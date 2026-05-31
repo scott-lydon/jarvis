@@ -65,6 +65,20 @@ export default tseslint.config(
 
       // Promise.reject(string) is the cousin of the previous one.
       '@typescript-eslint/prefer-promise-reject-errors': 'error',
+
+      // `prepare<Params, void>` is the better-sqlite3 idiom for an INSERT
+      // statement that returns no rows; allow void in generic position.
+      '@typescript-eslint/no-invalid-void-type': ['error', {
+        allowAsThisParameter: true,
+        allowInGenericTypeArguments: true,
+      }],
+
+      // Realtime WebSocket events arrive as `Record<string, unknown>`;
+      // we read fields by bracket access with explicit type checks. Dot
+      // notation would lose the index-signature safety we want.
+      '@typescript-eslint/dot-notation': ['error', {
+        allowIndexSignaturePropertyAccess: true,
+      }],
     },
   },
 

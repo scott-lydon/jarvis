@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+    <title>Jarvis — voice-first agent</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <main id="root">
+      <header class="topbar">
+        <h1 class="brand">Jarvis</h1>
+        <span id="cap-chip" class="chip" aria-live="polite">capabilities: loading…</span>
+      </header>
+
+      <section class="stage" aria-live="polite">
+        <div id="status-pill" class="status status-idle" role="status">idle</div>
+        <p id="caption" class="caption"></p>
+
+        <button id="mic-btn" class="mic-btn" type="button" aria-pressed="false">
+          <span class="mic-dot" aria-hidden="true"></span>
+          <span class="mic-label">Tap to talk</span>
+        </button>
+
+        <div class="bars" id="bars" aria-hidden="true">
+          <!-- 32 reactive bars get added by main.ts -->
+        </div>
+      </section>
+
+      <details class="dev-pane" id="dev-pane">
+        <summary>debug</summary>
+        <div class="dev-grid">
+          <div>
+            <h2>connection</h2>
+            <p id="dev-conn">disconnected</p>
+            <p id="dev-userid">user: —</p>
+          </div>
+          <div>
+            <h2>last tool result</h2>
+            <pre id="dev-tool">—</pre>
+          </div>
+          <div>
+            <h2>events</h2>
+            <pre id="dev-events"></pre>
+          </div>
+        </div>
+      </details>
+
+      <footer class="footer">
+        OpenAI Realtime · gpt-realtime · PCM16/24 kHz · localhost
+      </footer>
+    </main>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
