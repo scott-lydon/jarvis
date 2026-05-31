@@ -33,7 +33,45 @@ const INJECT_EXAMPLES = {
     ok:    true,
     id:    "mem_3a91",
   }, null, 2),
+  // F19: simulate_failure tab. Each preset lands the main screen in a
+  // repro state from QA_ADVERSARY.md categories. `failure_kind` is the
+  // discriminator the main-screen listener routes on. Default payload is
+  // intentionally minimal — the preset buttons below fill it.
+  simulate_failure: JSON.stringify({
+    failure_kind: "wttr_5xx",
+    payload: {},
+  }, null, 2),
 };
+
+// F19 presets. Each one is a fully-formed simulate_failure payload that maps
+// to a named repro from QA_ADVERSARY.md / spec.md. Listed alphabetically by
+// kind so the row order is stable (no shuffle on re-render).
+const SIMULATE_FAILURE_PRESETS = [
+  {
+    kind: 'github_token_missing',
+    label: 'github_token_missing',
+    desc: 'US-05 self-awareness branch',
+    payload: { failure_kind: 'github_token_missing' },
+  },
+  {
+    kind: 'token_in_log',
+    label: 'token_in_log',
+    desc: 'J-CAT-5 token-redaction repro',
+    payload: { failure_kind: 'token_in_log', value: 'sk-test-redact-me' },
+  },
+  {
+    kind: 'tool_timeout_2s',
+    label: 'tool_timeout_2s',
+    desc: 'J-CAT-7 filler-on-slow-tool',
+    payload: { failure_kind: 'tool_timeout_2s', tool: 'github' },
+  },
+  {
+    kind: 'wttr_5xx',
+    label: 'wttr_5xx',
+    desc: 'US-08 error branch',
+    payload: { failure_kind: 'wttr_5xx', status: 503 },
+  },
+];
 
 const SEED_EVENTS = [
   { t: '09:44:22.118', kind: 'audio.out',  msg: 'PCM16 frame 2.4kB → client' },
@@ -82,6 +120,52 @@ function DebugApp() {
   const [audioFrames, setAudioFrames] = useState(4192);
   const logRef = useRef(null);
 
+  // F17: BroadcastChannel between this debug surface and a sibling main
+  // screen (same browser, separate tab/window). The debug panel is the
+  // initiator; main.jsx listens on the same channel name. Heartbeat is a
+  // 2-second ping; lastPongAt drives the "DELIVERED → 1 main screen" vs
+  // "NO MAIN SCREEN ATTACHED" indicator next to the Inject button. If we
+  // never get a pong, the inject would silently fall on the floor and a
+  // developer would mistake that for a bug in main.jsx, so the channel
+  // status is surfaced explicitly.
+  const channelRef = useRef(null);
+  const [lastPongAt, setLastPongAt] = useState(0);
+  // Re-render every 1s so the "attached" indicator stays accurate (the
+  // 5-second timeout would otherwise only refresh on the next pong/inject).
+  const [, setHeartbeatTick] = useState(0);
+
+  useEffect(() => {
+    // Older Safari + iOS WebViews lack BroadcastChannel — guard so the
+    // debug surface degrades to "no main attached" instead of crashing.
+    if (typeof BroadcastChannel === 'undefined') {
+      channelRef.current = null;
+      return;
+    }
+    const ch = new BroadcastChannel('jarvis-debug');
+    channelRef.current = ch;
+    const onMsg = (ev) => {
+      const m = ev.data;
+      if (!m || typeof m !== 'object') return;
+      if (m.type === 'jarvis.pong') {
+        setLastPongAt(Date.now());
+      }
+    };
+    ch.addEventListener('message', onMsg);
+    const pingId = setInterval(() => {
+      try { ch.postMessage({ type: 'jarvis.ping', ts: Date.now() }); }
+      catch (_) { /* channel closed in another tab — ignore. */ }
+      setHeartbeatTick(n => n + 1);
+    }, 2000);
+    return () => {
+      clearInterval(pingId);
+      ch.removeEventListener('message', onMsg);
+      ch.close();
+      channelRef.current = null;
+    };
+  }, []);
+
+  const mainAttached = lastPongAt > 0 && (Date.now() - lastPongAt) < 5000;
+
   // Heartbeat: bump audio frame counter & token usage slowly to feel live
   useEffect(() => {
     const id = setInterval(() => {
@@ -105,6 +189,28 @@ function DebugApp() {
       return;
     }
     const t = nowTime();
+    const tsMs = Date.now();
+    // F17: emit on the BroadcastChannel. main.jsx listens and converts to
+    // a synthetic tool tile (or, for simulate_failure, an ErrorBanner).
+    // Note: postMessage is fire-and-forget; there is no delivery ack from
+    // the channel itself. We rely on the ping/pong heartbeat as the
+    // independent liveness signal.
+    let dispatched = false;
+    if (channelRef.current) {
+      try {
+        channelRef.current.postMessage({
+          type: 'jarvis.inject',
+          tool: activeTab,
+          payload: parsed,
+          ts: t,
+          tsMs,
+        });
+        dispatched = true;
+      } catch (e) {
+        setInjectStatus({ kind: 'err', msg: 'BroadcastChannel post failed: ' + e.message });
+        return;
+      }
+    }
     setEvents(ev => [{
       t, kind: 'inject.' + activeTab,
       msg: `injected ${Object.keys(parsed).length} keys`,
@@ -112,11 +218,17 @@ function DebugApp() {
     setLogs(l => [{
       t: t + '.' + String(Math.floor(Math.random() * 999)).padStart(3, '0'),
       lvl: 'info', src: 'debug',
-      msg: `inject ${activeTab} → main screen  payload=${payload.length}B`,
+      msg: `inject ${activeTab} → ${mainAttached ? 'main screen' : 'NO MAIN'}  payload=${payload.length}B`,
     }, ...l]);
-    setInjectStatus({ kind: 'ok', msg: 'Injected — main screen would receive this result' });
+    setInjectStatus(
+      dispatched && mainAttached
+        ? { kind: 'ok',   msg: 'DELIVERED → 1 main screen' }
+        : dispatched
+        ? { kind: 'warn', msg: 'Posted, but no main screen has responded — open index.html in another tab.' }
+        : { kind: 'err',  msg: 'BroadcastChannel unsupported in this browser.' }
+    );
     setTimeout(() => setInjectStatus(null), 2400);
-  }, [activeTab, drafts]);
+  }, [activeTab, drafts, mainAttached]);
 
   const clearLogs = () => setLogs([]);
 
@@ -132,6 +244,7 @@ function DebugApp() {
         activeTab={activeTab} setActiveTab={setActiveTab}
         drafts={drafts} setDrafts={setDrafts}
         inject={inject} injectStatus={injectStatus}
+        mainAttached={mainAttached}
         events={events}
         tokens={tokens} audioFrames={audioFrames}
         logs={logs} clearLogs={clearLogs} logRef={logRef}
@@ -292,8 +405,27 @@ function Column({ title, subtitle, children, action }) {
 }
 
 // ── Column 1: Inject tool results ─────────────────────────────
-function InjectColumn({ activeTab, setActiveTab, drafts, setDrafts, inject, injectStatus }) {
-  const tabs = ['weather', 'github', 'memory_write'];
+function InjectColumn({ activeTab, setActiveTab, drafts, setDrafts, inject, injectStatus, mainAttached }) {
+  // F19: simulate_failure tab added so a tester can land directly in the
+  // J-CAT-5 / J-CAT-7 / J-CAT-10 / US-08 error branches without having to
+  // wait for a real backend failure.
+  const tabs = ['weather', 'github', 'memory_write', 'simulate_failure'];
+  const isFailure = activeTab === 'simulate_failure';
+  // Derive the active failure_kind from the textarea (best effort — if the
+  // JSON does not parse we just call the button "Trigger failure").
+  let failureKind = null;
+  if (isFailure) {
+    try { failureKind = JSON.parse(drafts.simulate_failure)?.failure_kind ?? null; }
+    catch (_) { failureKind = null; }
+  }
+  const injectLabel = isFailure
+    ? (failureKind ? `Trigger ${failureKind}` : 'Trigger failure')
+    : `Inject ${activeTab}`;
+  const statusColor =
+    !injectStatus ? null
+    : injectStatus.kind === 'ok'   ? 'var(--accent)'
+    : injectStatus.kind === 'warn' ? 'var(--warn)'
+    : 'var(--err)';
   return (
     <Column title="Inject tool result" subtitle="Simulates a tool call returning this payload to the main screen.">
       {/* Tabs */}
@@ -320,6 +452,44 @@ function InjectColumn({ activeTab, setActiveTab, drafts, setDrafts, inject, inje
         flex: 1, minHeight: 0, padding: '12px',
         display: 'flex', flexDirection: 'column', gap: 10,
       }}>
+        {isFailure && (
+          /* F19 preset row — clicking a preset overwrites the textarea with
+             the canned payload for that failure kind. The presets are the
+             only safe way to discover available failure_kind values, since
+             main.jsx routes on that exact string. */
+          <div style={{
+            display: 'flex', flexWrap: 'wrap', gap: 6,
+            padding: '8px 10px',
+            background: 'var(--surface-1)',
+            border: '1px solid var(--border)',
+            borderRadius: 8,
+          }}>
+            <span className="mono" style={{
+              fontSize: 10, color: 'var(--warn)', letterSpacing: '0.06em',
+              textTransform: 'uppercase', marginRight: 4, alignSelf: 'center',
+            }}>preset</span>
+            {SIMULATE_FAILURE_PRESETS.map(p => (
+              <button
+                key={p.kind}
+                onClick={() => setDrafts(d => ({
+                  ...d,
+                  simulate_failure: JSON.stringify(p.payload, null, 2),
+                }))}
+                title={p.desc}
+                aria-label={`${p.label} — ${p.desc}`}
+                style={{
+                  padding: '5px 10px',
+                  fontSize: 11, fontFamily: 'var(--f-mono)',
+                  color: failureKind === p.kind ? 'var(--fg)' : 'var(--fg-muted)',
+                  background: failureKind === p.kind ? 'var(--surface-3)' : 'transparent',
+                  border: `1px solid ${failureKind === p.kind ? 'var(--border-strong)' : 'var(--border)'}`,
+                  borderRadius: 5,
+                }}
+              >{p.label}</button>
+            ))}
+          </div>
+        )}
+
         <textarea
           value={drafts[activeTab]}
           onChange={(e) => setDrafts(d => ({ ...d, [activeTab]: e.target.value }))}
@@ -338,24 +508,46 @@ function InjectColumn({ activeTab, setActiveTab, drafts, setDrafts, inject, inje
           }}
         />
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
           <button onClick={inject} style={{
             padding: '8px 14px',
-            background: 'var(--accent)', color: '#062611',
+            background: isFailure ? 'var(--warn)' : 'var(--accent)',
+            color: '#062611',
             border: 'none', borderRadius: 6,
             fontSize: 12.5, fontWeight: 600,
             fontFamily: 'var(--f-sans)',
-          }}>Inject {activeTab}</button>
+          }}>{injectLabel}</button>
           <button onClick={() => setDrafts(d => ({ ...d, [activeTab]: INJECT_EXAMPLES[activeTab] }))} style={{
             padding: '8px 12px',
             background: 'var(--surface-2)', color: 'var(--fg-muted)',
             border: '1px solid var(--border)', borderRadius: 6,
             fontSize: 12,
           }}>Reset example</button>
+          {/* F17: persistent attachment indicator. Green = a main screen
+              has pinged back within 5s. Red = no main screen. The pill is
+              always rendered so the developer doesn't have to remember
+              that "no pill" means "detached". */}
+          <span
+            className="mono"
+            title={mainAttached
+              ? 'A main screen tab is listening on BroadcastChannel("jarvis-debug").'
+              : 'Open index.html in another tab in this browser to attach.'}
+            style={{
+              padding: '4px 8px',
+              fontSize: 10, letterSpacing: '0.06em',
+              textTransform: 'uppercase',
+              color:      mainAttached ? 'var(--accent)' : 'var(--err)',
+              background: mainAttached ? 'var(--accent-soft)' : 'rgba(248,113,113,0.12)',
+              border: `1px solid ${mainAttached ? 'var(--accent-ring)' : 'rgba(248,113,113,0.32)'}`,
+              borderRadius: 999,
+            }}
+          >
+            {mainAttached ? '● main attached' : '● no main screen attached'}
+          </span>
           {injectStatus && (
             <span className="fade-in" style={{
               fontSize: 11.5,
-              color: injectStatus.kind === 'ok' ? 'var(--accent)' : 'var(--err)',
+              color: statusColor,
             }}>
               {injectStatus.msg}
             </span>

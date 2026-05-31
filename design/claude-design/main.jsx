@@ -133,6 +133,69 @@ function App() {
     setStreamingId(null);
   }, []);
 
+  // F17/F19: BroadcastChannel listener. The debug surface (debug.html in
+  // another tab of the same browser) drives this screen with:
+  //   - jarvis.ping  → reply with jarvis.pong so the debug panel can
+  //                    surface a live "main attached" indicator
+  //   - jarvis.inject → push a synthetic tool tile (or, when tool is
+  //                     'simulate_failure', push a banner instead)
+  //   - jarvis.force  → call handleForceState; lets a developer drive
+  //                     this screen into any state from the debug tab
+  // The channel is opened once on mount and closed on unmount. Failures
+  // here are silent on purpose — a missing BroadcastChannel (very old
+  // Safari, sandboxed iframe) means the debug surface simply cannot
+  // reach this tab, which is a non-fatal degradation.
+  useEffect(() => {
+    if (typeof BroadcastChannel === 'undefined') return;
+    const ch = new BroadcastChannel('jarvis-debug');
+    const onMsg = (ev) => {
+      const m = ev.data;
+      if (!m || typeof m !== 'object') return;
+      if (m.type === 'jarvis.ping') {
+        try { ch.postMessage({ type: 'jarvis.pong', ts: Date.now() }); }
+        catch (_) { /* channel closed in another tab — ignore. */ }
+        return;
+      }
+      if (m.type === 'jarvis.force' && typeof m.state === 'string') {
+        handleForceState(m.state);
+        return;
+      }
+      if (m.type === 'jarvis.inject') {
+        // F19 simulate_failure routes to a banner. Real failure injection
+        // (network drop, tool timeout, fake 5xx) lands in Slice 1 when
+        // the proxy actually exists; for the design loop this is enough
+        // to verify the wiring and the user-visible error surface.
+        if (m.tool === 'simulate_failure') {
+          const kind = m.payload?.failure_kind ?? 'unknown';
+          setBanners(b => [...b, {
+            id: `inj_${m.tsMs ?? Date.now()}`,
+            kind: 'err',
+            title: `Simulated failure: ${kind}`,
+            body: 'Driven by the debug surface via BroadcastChannel. Dismiss to clear.',
+            dismissible: true,
+          }]);
+          return;
+        }
+        // Default: turn the injected payload into a synthetic tool tile so
+        // the user sees the same UI shape as a real tool result.
+        setItems(it => [...it, {
+          id: `inj_${m.tsMs ?? Date.now()}`,
+          kind: 'tool',
+          name: m.tool,
+          duration: 0,
+          args: { source: 'debug-inject' },
+          result: m.payload,
+        }]);
+        return;
+      }
+    };
+    ch.addEventListener('message', onMsg);
+    return () => {
+      ch.removeEventListener('message', onMsg);
+      ch.close();
+    };
+  }, [handleForceState]);
+
   const dismissBanner = useCallback((id) => {
     setBanners(b => b.filter(x => x.id !== id));
   }, []);
