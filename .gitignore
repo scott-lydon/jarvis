@@ -40,3 +40,17 @@ coverage/
 
 # Build
 *.tsbuildinfo
+
+# Vitest config-reload artifacts (vite writes timestamp shims next to config)
+*.timestamp-*.mjs
+
+# Web client bundle (rebuilt on every deploy)
+web/dist/
+
+# Local Claude/.claude conversation cache, never committed
+.claude/
+
+# iOS build artifacts
+ios/Jarvis/.build/
+ios/Jarvis/.swiftpm/
+ios/Jarvis/Package.resolved

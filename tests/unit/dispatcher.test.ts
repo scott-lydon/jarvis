@@ -23,6 +23,7 @@ const env = {
   realtimeModel: 'gpt-realtime',
   realtimeVoice: 'marin',
   host: '127.0.0.1',
+  realtimeUrlOverride: null,
 } as const;
 
 const ctx: ToolContext = { userId: 'u1', env, db: null };

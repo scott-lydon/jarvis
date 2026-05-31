@@ -16,6 +16,7 @@ const env = {
   realtimeModel: 'gpt-realtime',
   realtimeVoice: 'marin',
   host: '127.0.0.1',
+  realtimeUrlOverride: null,
 } as const;
 
 const fakeWeather: ToolDefinition<{ location: string }> = {

@@ -56,7 +56,10 @@ interface IncomingFunctionCall {
 export function runProxy(opts: ProxyOptions): void {
   const { env, dispatcher, client, userCtx, toolCtx, onTurn } = opts;
 
-  const upstreamUrl = `${REALTIME_ROOT}?model=${encodeURIComponent(env.realtimeModel)}`;
+  // Integration tests point at a local fake upstream via the env override;
+  // production always uses the real OpenAI Realtime endpoint.
+  const upstreamUrl = env.realtimeUrlOverride
+    ?? `${REALTIME_ROOT}?model=${encodeURIComponent(env.realtimeModel)}`;
   // GA: Authorization only. NO `OpenAI-Beta` header — that triggers the
   // deprecated Beta shape and breaks everything subtly.
   const upstream = new UpstreamWS(upstreamUrl, {

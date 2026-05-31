@@ -15,6 +15,7 @@ import { emptyUserContext, resolveUserId } from './session.js';
 import { openDb, type Db } from './db.js';
 import { ToolDispatcher } from './tools/dispatcher.js';
 import { registerAllTools } from './tools/registry.js';
+import { maybeRollSummary } from './memory-summarizer.js';
 
 function main(): void {
   const env = loadEnv();
@@ -88,6 +89,20 @@ function main(): void {
               event: 'turn.persist_failed',
               message: cause instanceof Error ? cause.message : String(cause),
               userId,
+            });
+          }
+          // US-03 cross-session recall (Slice 4): after assistant turns,
+          // fire-and-forget the rolling summarizer. The function gates
+          // itself by a 20-new-turn threshold so we are not hitting the
+          // OpenAI Chat Completions API after every word. We never block
+          // the WebSocket loop on this — failures are logged inside.
+          if (turn.role === 'assistant') {
+            void maybeRollSummary(db, userId, env).catch((cause: unknown) => {
+              log.error({
+                event: 'summary.roll_failed_unexpectedly',
+                message: cause instanceof Error ? cause.message : String(cause),
+                userId,
+              });
             });
           }
         },

@@ -32,6 +32,10 @@ export interface JarvisEnv {
   readonly realtimeModel: string;
   readonly realtimeVoice: string;
   readonly host: string;
+  // Optional override of the upstream Realtime WebSocket URL. Production
+  // leaves this undefined; integration tests set it to a local fake
+  // upstream so they can measure proxy behavior without calling OpenAI.
+  readonly realtimeUrlOverride: string | null;
 }
 
 export function loadEnv(): JarvisEnv {
@@ -48,5 +52,6 @@ export function loadEnv(): JarvisEnv {
     realtimeModel: optionalEnv('JARVIS_REALTIME_MODEL', 'gpt-realtime'),
     realtimeVoice: optionalEnv('JARVIS_REALTIME_VOICE', 'marin'),
     host: optionalEnv('JARVIS_HOST', '0.0.0.0'),
+    realtimeUrlOverride: process.env.JARVIS_REALTIME_URL_OVERRIDE ?? null,
   };
 }
