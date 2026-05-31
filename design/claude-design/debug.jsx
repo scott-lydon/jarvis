@@ -175,10 +175,10 @@ function DebugApp() {
     return () => clearInterval(id);
   }, []);
 
-  // Auto-scroll logs to top (newest at top)
-  useEffect(() => {
-    if (logRef.current) logRef.current.scrollTop = 0;
-  }, [logs.length]);
+  // F20 supersedes the old "always yank to top on new logs" effect:
+  // LogsColumn now owns the scroll behavior so it can gate on whether
+  // the user is already at the top. Leaving the dumb yank here would
+  // fight the new smart-scroll logic.
 
   const inject = useCallback(() => {
     const payload = drafts[activeTab];
@@ -239,7 +239,22 @@ function DebugApp() {
       gridTemplateRows: 'auto 1fr',
       minHeight: '100vh',
     }}>
-      <TopBar forcedState={forcedState} setForcedState={setForcedState}/>
+      <TopBar
+        forcedState={forcedState}
+        setForcedState={setForcedState}
+        mainAttached={mainAttached}
+        applyForceToMain={(s) => {
+          // F16: the "apply to main" zone emits on the same channel the
+          // F17 inject path uses. We do NOT update forcedState here —
+          // that's the LOCAL preview's job, and conflating the two would
+          // hide the "no main attached" failure mode behind a green badge.
+          if (channelRef.current) {
+            try {
+              channelRef.current.postMessage({ type: 'jarvis.force', state: s, ts: Date.now() });
+            } catch (_) { /* channel closed in another tab — ignore. */ }
+          }
+        }}
+      />
       <Workspace
         activeTab={activeTab} setActiveTab={setActiveTab}
         drafts={drafts} setDrafts={setDrafts}
@@ -268,13 +283,30 @@ const FORCE_STATE_HINT = {
   interrupted: 'Transient (~400ms): red ring, X glyph. Auto-reverts to listening.',
 };
 
-function TopBar({ forcedState, setForcedState }) {
+function TopBar({ forcedState, setForcedState, mainAttached, applyForceToMain }) {
   // 'interrupted' is the transient barge-in cue (US-04). Forceable here so
   // a tester can land directly in that state without doing the voice dance.
   const opts = ['idle', 'listening', 'thinking', 'speaking', 'interrupted'];
+
+  // F16: visual split into Preview-here (no side effect beyond the debug
+  // panel's mental model) and Apply-to-main (broadcast a jarvis.force on
+  // the channel). Pre-fix the single row implied both behaviors at once,
+  // which left founders convinced clicking 'speaking' would make the main
+  // screen speak — it didn't. Now the two zones are explicit and labeled.
+  const zoneShell = {
+    display: 'flex', alignItems: 'center', gap: 6,
+    padding: '4px 6px',
+    background: 'var(--surface-1)', border: '1px solid var(--border)',
+    borderRadius: 8,
+  };
+  const zoneLabel = {
+    fontSize: 10, color: 'var(--fg-muted)', letterSpacing: '0.06em',
+    textTransform: 'uppercase', paddingLeft: 4, paddingRight: 2,
+  };
+
   return (
     <div style={{
-      display: 'flex', alignItems: 'center', gap: 14,
+      display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap',
       padding: '11px 18px',
       borderBottom: '1px solid var(--border)',
       background: 'var(--bg)',
@@ -298,28 +330,18 @@ function TopBar({ forcedState, setForcedState }) {
         }}>debug</span>
       </div>
 
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 6,
-        marginLeft: 8, padding: '4px 6px',
-        background: 'var(--surface-1)', border: '1px solid var(--border)',
-        borderRadius: 8,
-      }}>
-        <span className="mono" style={{
-          fontSize: 10, color: 'var(--fg-muted)', letterSpacing: '0.06em',
-          textTransform: 'uppercase', paddingLeft: 4,
-        }}>force state</span>
-        {/* `title` attributes added post-UX-review so a developer hovering
-            knows what each state DOES (vs. just painting the badge). Per the
-            debug-critic finding: "a founder mid-demo will tap 'speaking'
-            expecting audio and nothing happens" — the tooltips are the cheap
-            fix; full two-zone restructure (preview vs. apply-to-main) lands
-            when the inject pipe is wired in Slice 1. */}
+      {/* Left zone: PREVIEW HERE. Updates `forcedState` only. The debug
+          panel re-renders its mental model of "what state should the main
+          screen LOOK like" — useful for narrating during demos without
+          actually mutating any external surface. */}
+      <div className="mono" style={zoneShell}>
+        <span style={zoneLabel}>preview here</span>
         {opts.map(o => (
           <button
-            key={o}
+            key={`prev-${o}`}
             onClick={() => setForcedState(o)}
-            title={FORCE_STATE_HINT[o]}
-            aria-label={`Force ${o} — ${FORCE_STATE_HINT[o]}`}
+            title={`Preview locally — ${FORCE_STATE_HINT[o]}`}
+            aria-label={`Preview ${o} in this panel only`}
             style={{
               padding: '5px 10px', fontSize: 11.5, fontFamily: 'var(--f-mono)',
               color: forcedState === o ? 'var(--fg)' : 'var(--fg-muted)',
@@ -340,6 +362,57 @@ function TopBar({ forcedState, setForcedState }) {
             borderRadius: 5, textDecoration: 'none',
             fontFamily: 'var(--f-mono)',
           }}>open ↗</a>
+      </div>
+
+      {/* Right zone: APPLY TO MAIN. Emits {type:'jarvis.force', state} on
+          BroadcastChannel('jarvis-debug'). main.jsx listens and calls
+          handleForceState. When no main tab has pinged back within 5s,
+          the NO MAIN SCREEN ATTACHED red pill replaces the buttons so
+          the developer doesn't waste taps. */}
+      <div className="mono" style={{
+        ...zoneShell,
+        // Soft warn tint so the apply-zone visually reads as 'side-effect'.
+        background: mainAttached ? 'var(--surface-1)' : 'rgba(248,113,113,0.06)',
+        borderColor: mainAttached ? 'var(--border)' : 'rgba(248,113,113,0.32)',
+      }}>
+        <span style={{ ...zoneLabel, color: 'var(--warn)' }}>apply to main →</span>
+        {mainAttached ? (
+          opts.map(o => (
+            <button
+              key={`apply-${o}`}
+              onClick={() => applyForceToMain(o)}
+              title={`Send to main screen — ${FORCE_STATE_HINT[o]}`}
+              aria-label={`Apply ${o} to the attached main screen — ${FORCE_STATE_HINT[o]}`}
+              style={{
+                padding: '5px 10px', fontSize: 11.5, fontFamily: 'var(--f-mono)',
+                color: 'var(--fg-muted)',
+                background: 'transparent',
+                border: '1px solid transparent',
+                borderRadius: 5,
+                cursor: 'pointer',
+              }}
+              onMouseEnter={(e) => {
+                e.currentTarget.style.background    = 'var(--accent-soft)';
+                e.currentTarget.style.color        = 'var(--accent)';
+                e.currentTarget.style.borderColor   = 'var(--accent-ring)';
+              }}
+              onMouseLeave={(e) => {
+                e.currentTarget.style.background    = 'transparent';
+                e.currentTarget.style.color        = 'var(--fg-muted)';
+                e.currentTarget.style.borderColor   = 'transparent';
+              }}
+            >{o}</button>
+          ))
+        ) : (
+          <span
+            title="Open index.html in another tab in this browser. The two tabs talk over BroadcastChannel('jarvis-debug')."
+            style={{
+              padding: '5px 10px', fontSize: 11,
+              color: 'var(--err)', letterSpacing: '0.04em',
+              textTransform: 'uppercase', fontFamily: 'var(--f-mono)',
+            }}
+          >no main screen attached</span>
+        )}
       </div>
 
       <div style={{ flex: 1 }}/>
@@ -645,18 +718,132 @@ function eventColor(k) {
 }
 
 // ── Column 3: Logs ────────────────────────────────────────────
+// F20 — search, click-row-to-copy as TSV, per-row permalink, smart
+// auto-scroll. The scroll-gating is the highest-impact part: the prior
+// behavior YANKED the user back to the top every time a new event
+// arrived, fighting any attempt to read a historical line. Now the auto-
+// scroll only fires when the user is already at the top; otherwise a
+// "↑ new events" pill appears and the user opts in.
 function LogsColumn({ logs, clearLogs, logRef }) {
   const [filter, setFilter] = useState('all');
-  const filtered = useMemo(
-    () => filter === 'all' ? logs : logs.filter(l => l.lvl === filter),
-    [logs, filter]
-  );
+  const [query, setQuery]   = useState('');
+  const [toast, setToast]   = useState(null);
+  const [autoFollow, setAutoFollow] = useState(true);
+  const [pendingNew, setPendingNew] = useState(0);
+
+  // Filter pass: level + case-insensitive search across msg and src.
+  const filtered = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    return logs.filter(l => {
+      if (filter !== 'all' && l.lvl !== filter) return false;
+      if (!q) return true;
+      const hay = `${l.msg ?? ''} ${l.src ?? ''}`.toLowerCase();
+      return hay.includes(q);
+    });
+  }, [logs, filter, query]);
+
+  // Track scroll position to decide whether to auto-follow on new events.
+  // The threshold (8px) is generous so a user who has barely scrolled is
+  // still treated as "at top"; once they pass that, we stop yanking them.
+  useEffect(() => {
+    const el = logRef.current;
+    if (!el) return;
+    const onScroll = () => {
+      const atTop = el.scrollTop < 8;
+      setAutoFollow(atTop);
+      if (atTop) setPendingNew(0);
+    };
+    el.addEventListener('scroll', onScroll, { passive: true });
+    return () => el.removeEventListener('scroll', onScroll);
+  }, [logRef]);
+
+  // On new logs: if the user is at the top, follow; otherwise increment
+  // the pending-new counter so the "↑ new events" pill can grow a count.
+  const prevLenRef = useRef(logs.length);
+  useEffect(() => {
+    const grew = logs.length > prevLenRef.current;
+    const delta = logs.length - prevLenRef.current;
+    prevLenRef.current = logs.length;
+    if (!grew) return;
+    if (autoFollow && logRef.current) {
+      logRef.current.scrollTop = 0;
+    } else {
+      setPendingNew(n => n + delta);
+    }
+  }, [logs.length, autoFollow, logRef]);
+
+  // Toast helper. 1.5s window, auto-clears.
+  const flashToast = useCallback((msg) => {
+    setToast(msg);
+    const id = setTimeout(() => setToast(null), 1500);
+    return () => clearTimeout(id);
+  }, []);
+
+  const copyToClipboard = useCallback(async (text) => {
+    // Prefer the async clipboard API; fall back to a synthetic textarea
+    // for browsers / contexts where it's missing (Safari < 13.1, file:// URLs).
+    try {
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(text);
+        return true;
+      }
+    } catch (_) { /* fall through to fallback */ }
+    try {
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.style.position = 'fixed';
+      ta.style.opacity  = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      return ok;
+    } catch (_) {
+      return false;
+    }
+  }, []);
+
+  const copyRow = useCallback(async (l) => {
+    const tsv = `${l.t}\t${l.lvl}\t${l.src}\t${l.msg}`;
+    const ok = await copyToClipboard(tsv);
+    flashToast(ok ? 'Copied row' : 'Copy failed');
+  }, [copyToClipboard, flashToast]);
+
+  const copyPermalink = useCallback(async (l) => {
+    // Set hash so reload/bookmark lands the user on this row. The hash
+    // is intentionally short (ts=HH:MM:SS.mmm) so a developer can paste
+    // it into a bug report and another developer can re-find the row.
+    window.location.hash = `ts=${l.t}`;
+    const url = window.location.href;
+    const ok = await copyToClipboard(url);
+    flashToast(ok ? 'Permalink copied' : 'URL hash set');
+  }, [copyToClipboard, flashToast]);
+
+  const jumpToTop = useCallback(() => {
+    if (logRef.current) logRef.current.scrollTop = 0;
+    setAutoFollow(true);
+    setPendingNew(0);
+  }, [logRef]);
+
   return (
     <Column
       title="Logs"
-      subtitle={`${logs.length} events · scrolls inside this pane`}
+      subtitle={`${logs.length} events · ${filtered.length} shown · scrolls inside this pane`}
       action={
-        <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+        <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+          <input
+            type="search"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="search msg + src"
+            aria-label="Search logs"
+            style={{
+              background: 'var(--surface-1)', color: 'var(--fg)',
+              border: '1px solid var(--border)', borderRadius: 5,
+              padding: '4px 7px', fontSize: 11, fontFamily: 'var(--f-mono)',
+              outline: 'none', width: 160,
+            }}
+          />
           <select value={filter} onChange={(e) => setFilter(e.target.value)} style={{
             background: 'var(--surface-1)', color: 'var(--fg-muted)',
             border: '1px solid var(--border)', borderRadius: 5,
@@ -678,45 +865,109 @@ function LogsColumn({ logs, clearLogs, logRef }) {
         </div>
       }
     >
-      <div ref={logRef} className="scroll-area" style={{
-        flex: 1, minHeight: 0, padding: '4px 0',
-      }}>
-        <table style={{
-          width: '100%', borderCollapse: 'collapse',
-          fontFamily: 'var(--f-mono)', fontSize: 11.5,
+      <div style={{ position: 'relative', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' }}>
+        {/* "↑ new events" pill — only when the user has scrolled away
+            AND new events have landed while they were away. Tapping it
+            jumps back to the top and re-enables auto-follow. */}
+        {pendingNew > 0 && (
+          <button
+            onClick={jumpToTop}
+            className="fade-in"
+            style={{
+              position: 'absolute', top: 8, left: '50%',
+              transform: 'translateX(-50%)',
+              padding: '5px 12px',
+              background: 'var(--accent)', color: '#062611',
+              border: 'none', borderRadius: 999,
+              fontSize: 11, fontWeight: 600,
+              fontFamily: 'var(--f-mono)',
+              cursor: 'pointer', zIndex: 3,
+              boxShadow: '0 6px 16px -8px rgba(0,0,0,0.6)',
+            }}
+            aria-label="Jump to top to see new events"
+          >↑ {pendingNew} new event{pendingNew === 1 ? '' : 's'}</button>
+        )}
+        {toast && (
+          <div
+            role="status" aria-live="polite"
+            className="fade-in"
+            style={{
+              position: 'absolute', top: 8, right: 12,
+              padding: '4px 10px',
+              background: 'var(--surface-3)', color: 'var(--fg)',
+              border: '1px solid var(--border-strong)',
+              borderRadius: 999,
+              fontSize: 11, fontFamily: 'var(--f-mono)',
+              zIndex: 3,
+            }}
+          >{toast}</div>
+        )}
+        <div ref={logRef} className="scroll-area" style={{
+          flex: 1, minHeight: 0, padding: '4px 0',
         }}>
-          <tbody>
-            {filtered.length === 0 && (
-              <tr>
-                <td colSpan={4} style={{ padding: 24, textAlign: 'center', color: 'var(--fg-faint)' }}>
-                  No events
-                </td>
-              </tr>
-            )}
-            {filtered.map((l, i) => (
-              <tr key={i} style={{ borderTop: i === 0 ? 'none' : '1px solid var(--hairline)' }}>
-                <td style={{
-                  padding: '5px 10px 5px 14px', whiteSpace: 'nowrap',
-                  color: 'var(--fg-faint)', verticalAlign: 'top',
-                }}>{l.t}</td>
-                <td style={{
-                  padding: '5px 8px', whiteSpace: 'nowrap',
-                  color: lvlColor(l.lvl), verticalAlign: 'top', width: 50,
-                  textTransform: 'uppercase', fontSize: 10, letterSpacing: '0.04em',
-                }}>{l.lvl}</td>
-                <td style={{
-                  padding: '5px 8px', whiteSpace: 'nowrap',
-                  color: 'var(--fg-muted)', verticalAlign: 'top', width: 70,
-                }}>{l.src}</td>
-                <td style={{
-                  padding: '5px 14px 5px 8px',
-                  color: 'var(--fg)', verticalAlign: 'top',
-                  wordBreak: 'break-word',
-                }}>{l.msg}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+          <table style={{
+            width: '100%', borderCollapse: 'collapse',
+            fontFamily: 'var(--f-mono)', fontSize: 11.5,
+          }}>
+            <tbody>
+              {filtered.length === 0 && (
+                <tr>
+                  <td colSpan={5} style={{ padding: 24, textAlign: 'center', color: 'var(--fg-faint)' }}>
+                    {query ? `No events match "${query}"` : 'No events'}
+                  </td>
+                </tr>
+              )}
+              {filtered.map((l, i) => (
+                <tr
+                  key={i}
+                  onClick={() => copyRow(l)}
+                  title="Click to copy row as TSV"
+                  style={{
+                    borderTop: i === 0 ? 'none' : '1px solid var(--hairline)',
+                    cursor: 'pointer',
+                  }}
+                  onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--surface-1)'; }}
+                  onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent'; }}
+                >
+                  <td style={{
+                    padding: '5px 10px 5px 14px', whiteSpace: 'nowrap',
+                    color: 'var(--fg-faint)', verticalAlign: 'top',
+                  }}>{l.t}</td>
+                  <td style={{
+                    padding: '5px 8px', whiteSpace: 'nowrap',
+                    color: lvlColor(l.lvl), verticalAlign: 'top', width: 50,
+                    textTransform: 'uppercase', fontSize: 10, letterSpacing: '0.04em',
+                  }}>{l.lvl}</td>
+                  <td style={{
+                    padding: '5px 8px', whiteSpace: 'nowrap',
+                    color: 'var(--fg-muted)', verticalAlign: 'top', width: 70,
+                  }}>{l.src}</td>
+                  <td style={{
+                    padding: '5px 8px 5px 8px',
+                    color: 'var(--fg)', verticalAlign: 'top',
+                    wordBreak: 'break-word',
+                  }}>{l.msg}</td>
+                  <td style={{
+                    padding: '5px 14px 5px 8px',
+                    verticalAlign: 'top', width: 28, textAlign: 'right',
+                  }}>
+                    <button
+                      onClick={(e) => { e.stopPropagation(); copyPermalink(l); }}
+                      title="Copy permalink to this row"
+                      aria-label={`Copy permalink to event at ${l.t}`}
+                      style={{
+                        padding: 2,
+                        background: 'transparent', border: 'none',
+                        color: 'var(--fg-muted)', fontSize: 12,
+                        cursor: 'pointer',
+                      }}
+                    >🔗</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </div>
     </Column>
   );
