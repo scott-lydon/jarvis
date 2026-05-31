@@ -64,6 +64,10 @@ function App() {
   const [banners, setBanners] = useState([]);
   const [micLevels, setMicLevels] = useState([0.3, 0.5, 0.4, 0.6, 0.5, 0.4, 0.5]);
   const [streamingId, setStreamingId] = useState(null);
+  // F15: persistent capability chip + inline panel. Closed by default so the
+  // chip is the affordance; opening reveals the same ExamplePrompts the idle
+  // state uses, but at any point in the session (not just first turn).
+  const [capOpen, setCapOpen] = useState(false);
   const logRef = useRef(null);
 
   // Auto-scroll log to bottom on new items
@@ -158,7 +162,26 @@ function App() {
 
   return (
     <>
-      <Header state={state} sessionId="op_3a91" dev={showForce}/>
+      <Header
+        state={state}
+        sessionId="op_3a91"
+        dev={showForce}
+        capabilityChip={
+          <CapabilityChip
+            open={capOpen}
+            onToggle={() => setCapOpen(v => !v)}
+          />
+        }
+      />
+
+      {/* F15 capability panel — opens inline below the Header. Constrained
+          max-h + overflow-y per the global overlay rule. Closing on pick keeps
+          the chip a one-tap affordance (open, scan, choose, dismiss). */}
+      <CapabilityPanel
+        open={capOpen}
+        onClose={() => setCapOpen(false)}
+        onPick={() => setCapOpen(false)}
+      />
 
       {/* Conversation log — scrolls inside its own container */}
       <div ref={logRef} className="scroll-area" style={{

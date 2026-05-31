@@ -67,7 +67,7 @@ const STATE_META = {
 // ─────────────────────────────────────────────────────────────
 // HEADER — status badge + session id
 // ─────────────────────────────────────────────────────────────
-function Header({ state, sessionId, dev }) {
+function Header({ state, sessionId, dev, capabilityChip }) {
   const meta = STATE_META[state];
   return (
     <div style={{
@@ -103,21 +103,26 @@ function Header({ state, sessionId, dev }) {
         )}
       </div>
 
-      {/* Status badge with state-glyph (redundant non-color signal). */}
-      <div
-        role="status"
-        aria-label={`Jarvis is ${meta.label}. ${meta.hint}`}
-        style={{
-          display: 'flex', alignItems: 'center', gap: 7,
-          padding: '5px 10px 5px 8px',
-          background: 'var(--surface-1)',
-          border: '1px solid var(--border)',
-          borderRadius: 999,
-          fontSize: 12,
-        }}
-      >
-        <span className={`state-glyph ${meta.glyph}`} aria-hidden="true"/>
-        <span style={{ color: meta.color, fontWeight: 500 }}>{meta.label}</span>
+      {/* Status badge + (optional) capability chip. The chip is supplied by
+          the parent (main.jsx) so the chip can carry its own open/onToggle
+          state without leaking into Header. Gap 6 keeps them clustered. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        {capabilityChip}
+        <div
+          role="status"
+          aria-label={`Jarvis is ${meta.label}. ${meta.hint}`}
+          style={{
+            display: 'flex', alignItems: 'center', gap: 7,
+            padding: '5px 10px 5px 8px',
+            background: 'var(--surface-1)',
+            border: '1px solid var(--border)',
+            borderRadius: 999,
+            fontSize: 12,
+          }}
+        >
+          <span className={`state-glyph ${meta.glyph}`} aria-hidden="true"/>
+          <span style={{ color: meta.color, fontWeight: 500 }}>{meta.label}</span>
+        </div>
       </div>
 
       {/* Screen-reader-only live region. Announces every state transition so
@@ -765,10 +770,103 @@ function Footer({ onReset, turns, showForce, onToggleForce }) {
   );
 }
 
+// ─────────────────────────────────────────────────────────────
+// CAPABILITY CHIP — persistent "what can I ask?" affordance (F15)
+// ─────────────────────────────────────────────────────────────
+// Pre-fix the example prompts evaporated after the first turn and never
+// came back. A returning user who forgot the tool surface had to scroll
+// back through history hunting for examples, or guess. The chip lives in
+// the Header gap and reveals an inline ExamplePrompts panel on tap.
+// Closed by default; chevron flips when open; tap outside or the chip
+// again to dismiss.
+function CapabilityChip({ open, onToggle }) {
+  return (
+    <button
+      onClick={onToggle}
+      aria-expanded={open}
+      aria-controls="capability-panel"
+      aria-label="Show what you can ask"
+      style={{
+        display: 'inline-flex', alignItems: 'center', gap: 5,
+        padding: '4px 9px',
+        background: open ? 'var(--surface-3)' : 'var(--surface-1)',
+        border: `1px solid ${open ? 'var(--border-strong)' : 'var(--border)'}`,
+        borderRadius: 999,
+        fontSize: 11, color: 'var(--fg-muted)',
+        fontFamily: 'var(--f-mono)',
+        cursor: 'pointer',
+        transition: 'background 150ms, border-color 150ms',
+      }}
+    >
+      <span style={{
+        display: 'inline-grid', placeItems: 'center',
+        width: 14, height: 14, borderRadius: '50%',
+        border: '1px solid var(--fg-muted)',
+        fontSize: 9, fontWeight: 700, lineHeight: 1,
+      }}>?</span>
+      <span>Ask</span>
+      <span style={{
+        fontSize: 8, color: 'var(--fg-dim)',
+        transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+        transition: 'transform 150ms',
+      }}>▾</span>
+    </button>
+  );
+}
+
+// CapabilityPanel — the inline overlay that opens beneath the Header.
+// Reuses ExamplePrompts so chip semantics and idle-state semantics stay
+// in sync. Constrained max-h + overflow-y per global overlay rule.
+function CapabilityPanel({ open, onClose, onPick }) {
+  if (!open) return null;
+  return (
+    <div
+      id="capability-panel"
+      role="dialog"
+      aria-label="What you can ask Jarvis"
+      style={{
+        position: 'relative',
+        margin: '0 12px',
+        marginTop: 6,
+        background: 'var(--surface-1)',
+        border: '1px solid var(--border-strong)',
+        borderRadius: 8,
+        maxHeight: 'min(60vh, calc(100vh - 8rem))',
+        overflowY: 'auto',
+        overscrollBehavior: 'contain',
+        zIndex: 4,
+        boxShadow: '0 8px 24px -10px rgba(0,0,0,0.6)',
+      }}
+    >
+      <div style={{
+        display: 'flex', alignItems: 'center',
+        padding: '8px 12px',
+        borderBottom: '1px solid var(--hairline)',
+        position: 'sticky', top: 0, background: 'var(--surface-1)',
+      }}>
+        <span className="mono" style={{
+          fontSize: 10, letterSpacing: '0.08em',
+          color: 'var(--fg-muted)', textTransform: 'uppercase',
+        }}>What you can ask</span>
+        <div style={{ flex: 1 }}/>
+        <button
+          onClick={onClose}
+          aria-label="Close capabilities"
+          style={{ color: 'var(--fg-muted)', padding: 4 }}
+        >
+          <Icon.close/>
+        </button>
+      </div>
+      <ExamplePrompts onUse={(p) => { onPick?.(p); onClose?.(); }}/>
+    </div>
+  );
+}
+
 Object.assign(window, {
   Icon, STATE_META, TOOL_META,
   Header, ErrorBanner, TurnRow, ToolTile, JsonBlock, CollapseRow,
   ExamplePrompts, MicButton, ThinkingDots, WaveformBars, LevelMeter,
   ForceStateBar, Footer,
+  CapabilityChip, CapabilityPanel,
   EXAMPLE_PROMPTS,
 });
