@@ -49,10 +49,15 @@ const Icon = {
 // STATE LABELS
 // ─────────────────────────────────────────────────────────────
 const STATE_META = {
-  idle:      { label: 'Idle',      hint: 'Tap mic to start',          dotClass: '',     color: 'var(--fg-muted)' },
-  listening: { label: 'Listening', hint: 'Speak now',                 dotClass: 'live', color: 'var(--accent)'   },
-  thinking:  { label: 'Thinking',  hint: 'Routing…',                  dotClass: 'warn', color: 'var(--warn)'     },
-  speaking:  { label: 'Speaking',  hint: 'Jarvis is responding',      dotClass: 'live', color: 'var(--accent)'   },
+  idle:        { label: 'Idle',        hint: 'Tap mic to start',          dotClass: '',     color: 'var(--fg-muted)' },
+  listening:   { label: 'Listening',   hint: 'Speak now',                 dotClass: 'live', color: 'var(--accent)'   },
+  thinking:    { label: 'Thinking',    hint: 'Routing…',                  dotClass: 'warn', color: 'var(--warn)'     },
+  speaking:    { label: 'Speaking',    hint: 'Jarvis is responding',      dotClass: 'live', color: 'var(--accent)'   },
+  // Transient state shown for ~400ms after a barge-in cancel (US-04).
+  // Visual proof to the tester that the cancel fired and the in-flight
+  // response was stopped. Auto-reverts to 'listening' (the user is the
+  // one who interrupted, so we should hear them next).
+  interrupted: { label: 'Interrupted', hint: 'Stopping…',                 dotClass: 'err',  color: 'var(--err)'      },
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -458,7 +463,7 @@ function LevelMeter({ levels = [0.4, 0.7, 0.55, 0.9, 0.6, 0.4, 0.7] }) {
 // FORCE STATE TOOLBAR — dev mode only
 // ─────────────────────────────────────────────────────────────
 function ForceStateBar({ state, onSet }) {
-  const opts = ['idle', 'listening', 'thinking', 'speaking'];
+  const opts = ['idle', 'listening', 'thinking', 'speaking', 'interrupted'];
   return (
     <div style={{
       margin: '0 12px 8px',

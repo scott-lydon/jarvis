@@ -4,6 +4,9 @@ const { useState, useEffect, useRef, useMemo, useCallback } = React;
 
 // ─── Pre-filled JSON examples for tool injection ─────────────
 const INJECT_EXAMPLES = {
+  // Mirrors the tool contract in plan.md §2.4. `fetched_at_iso` is the
+  // freshness annotation that satisfies the "no reused-as-fresh data" rule
+  // — the debug panel surfaces it so a tester can verify the cache age.
   weather: JSON.stringify({
     location: "Austin, TX",
     temp_f: 84,
@@ -12,6 +15,7 @@ const INJECT_EXAMPLES = {
     humidity: 58,
     wind_mph: 8,
     source: "wttr.in",
+    fetched_at_iso: "2026-05-31T16:44:13.366Z",
   }, null, 2),
   github: JSON.stringify({
     endpoint: "GET /repos/cattle-co/feeder/pulls",
@@ -52,7 +56,7 @@ const SEED_LOGS = [
   { t: '09:44:14.220', lvl: 'info',  src: 'ws',      msg: 'response.audio.delta  size=18kB' },
   { t: '09:44:13.778', lvl: 'info',  src: 'tools',   msg: 'weather      ok       412ms' },
   { t: '09:44:13.366', lvl: 'info',  src: 'tools',   msg: 'weather      call     wttr.in?q=Austin,TX&format=j1' },
-  { t: '09:44:12.001', lvl: 'info',  src: 'session', msg: 'session.created  model=gpt-4o-realtime-preview' },
+  { t: '09:44:12.001', lvl: 'info',  src: 'session', msg: 'session.created  model=gpt-realtime' },
   { t: '09:44:11.998', lvl: 'info',  src: 'ws',      msg: 'connect openai realtime → 101 switching protocols' },
   { t: '09:44:11.802', lvl: 'info',  src: 'http',    msg: 'POST /session.start  user=op_3a91' },
 ];
@@ -140,7 +144,9 @@ function DebugApp() {
 // TOP BAR — title, force-state toolbar, back link
 // ─────────────────────────────────────────────────────────────
 function TopBar({ forcedState, setForcedState }) {
-  const opts = ['idle', 'listening', 'thinking', 'speaking'];
+  // 'interrupted' is the transient barge-in cue (US-04). Forceable here so
+  // a tester can land directly in that state without doing the voice dance.
+  const opts = ['idle', 'listening', 'thinking', 'speaking', 'interrupted'];
   return (
     <div style={{
       display: 'flex', alignItems: 'center', gap: 14,
@@ -341,7 +347,7 @@ function StateColumn({ events, tokens, audioFrames }) {
     <Column title="Session" subtitle="Live data from the WebSocket.">
       <div className="scroll-area" style={{ flex: 1, minHeight: 0, padding: 14 }}>
         <KV label="USER ID"     value="op_3a91"/>
-        <KV label="MODEL"       value="gpt-4o-realtime-preview"/>
+        <KV label="MODEL"       value="gpt-realtime"/>
         <KV label="WEBSOCKET"   value={<><span className="dot live" style={{ marginRight: 6 }}/>connected · 412ms</>}/>
         <KV label="STARTED"     value="09:44:11.998"/>
 
