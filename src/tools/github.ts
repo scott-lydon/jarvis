@@ -35,6 +35,63 @@ function gitHubAvailable(env: JarvisEnv): string | null {
   return env.githubToken === null ? 'GITHUB_TOKEN is not configured on the server.' : null;
 }
 
+/**
+ * Read the user's `flag_author` preference (set via `preference_set`) and
+ * return the comma-separated authors, lowercased and trimmed, with empty
+ * entries dropped. Returns an empty set when no DB is connected or no
+ * preference is stored.
+ *
+ * This is the deterministic side of US-08 / "Always flag PRs from X" —
+ * the prompt-level instruction is still in place (the model speaks the
+ * flag), but the post-filter below guarantees the PR appears at the top
+ * of the response payload so the model cannot miss it.
+ */
+export function readFlaggedAuthors(ctx: ToolContext): Set<string> {
+  const out = new Set<string>();
+  if (ctx.db === null) return out;
+  try {
+    const row = ctx.db
+      .prepare<{ user_id: string }, { value: string }>(
+        `SELECT value FROM preferences WHERE user_id = @user_id AND key = 'flag_author'`,
+      )
+      .get({ user_id: ctx.userId });
+    const raw = row?.value ?? '';
+    for (const piece of raw.split(',')) {
+      const trimmed = piece.trim().toLowerCase();
+      if (trimmed.length > 0) out.add(trimmed);
+    }
+  } catch (cause) {
+    log.warn({
+      event: 'github.read_flagged_authors_failed',
+      message: cause instanceof Error ? cause.message : String(cause),
+      userId: ctx.userId,
+    });
+  }
+  return out;
+}
+
+/**
+ * Re-order a list so entries authored by a flagged author bubble to the
+ * top. Stable: preserves the relative order within each partition. Each
+ * flagged-author entry is tagged with `flagged: true` so the model and
+ * the web client can render a visual cue.
+ *
+ * Behavior is a no-op when `flagged` is empty.
+ */
+function applyAuthorFlagging<T extends { readonly author: string }>(
+  rows: readonly T[],
+  flagged: ReadonlySet<string>,
+): readonly (T & { flagged: boolean })[] {
+  if (flagged.size === 0) return rows.map((r) => ({ ...r, flagged: false }));
+  const flaggedRows: (T & { flagged: boolean })[] = [];
+  const otherRows: (T & { flagged: boolean })[] = [];
+  for (const r of rows) {
+    const isFlagged = flagged.has(r.author.toLowerCase());
+    (isFlagged ? flaggedRows : otherRows).push({ ...r, flagged: isFlagged });
+  }
+  return [...flaggedRows, ...otherRows];
+}
+
 interface RepoRef { readonly owner: string; readonly repo: string }
 
 function parseRepoRef(input: string): RepoRef | { error: string } {
@@ -100,12 +157,9 @@ export const githubListPrsTool: ToolDefinition<z.infer<typeof listPrsSchema>> = 
         sort: 'created',
         direction: 'desc',
       });
-      return {
-        owner: args.owner,
-        repo: args.repo,
-        state: args.state ?? 'open',
-        count: res.data.length,
-        prs: res.data.map((p) => ({
+      const flagged = readFlaggedAuthors(ctx);
+      const prs = applyAuthorFlagging(
+        res.data.map((p) => ({
           number: p.number,
           title: p.title,
           author: p.user?.login ?? 'unknown',
@@ -113,6 +167,15 @@ export const githubListPrsTool: ToolDefinition<z.infer<typeof listPrsSchema>> = 
           created_at: p.created_at,
           draft: p.draft ?? false,
         })),
+        flagged,
+      );
+      return {
+        owner: args.owner,
+        repo: args.repo,
+        state: args.state ?? 'open',
+        count: prs.length,
+        flagged_authors: [...flagged],
+        prs,
       };
     } catch (cause) {
       log.warn({ event: 'github.list_prs_failed', owner: args.owner, repo: args.repo });
@@ -256,17 +319,27 @@ export const githubListRecentMergesTool: ToolDefinition<z.infer<typeof listMerge
         sort: 'updated',
         direction: 'desc',
       });
-      const merges = res.data
-        .filter((p) => p.merged_at !== null)
-        .slice(0, args.limit ?? 5)
-        .map((p) => ({
-          number: p.number,
-          title: p.title,
-          author: p.user?.login ?? 'unknown',
-          merged_at: p.merged_at ?? '',
-          html_url: p.html_url,
-        }));
-      return { owner: args.owner, repo: args.repo, count: merges.length, merges };
+      const flagged = readFlaggedAuthors(ctx);
+      const merges = applyAuthorFlagging(
+        res.data
+          .filter((p) => p.merged_at !== null)
+          .slice(0, args.limit ?? 5)
+          .map((p) => ({
+            number: p.number,
+            title: p.title,
+            author: p.user?.login ?? 'unknown',
+            merged_at: p.merged_at ?? '',
+            html_url: p.html_url,
+          })),
+        flagged,
+      );
+      return {
+        owner: args.owner,
+        repo: args.repo,
+        count: merges.length,
+        flagged_authors: [...flagged],
+        merges,
+      };
     } catch (cause) {
       log.warn({ event: 'github.recent_merges_failed', owner: args.owner, repo: args.repo });
       return handleOctokitError(cause, args.owner, args.repo);
@@ -301,7 +374,13 @@ export const githubOpenPrForIssueTool: ToolDefinition<z.infer<typeof openPrSchem
       const baseRef = await o.git.getRef({ owner: args.owner, repo: args.repo, ref: `heads/${base}` });
       const baseSha = baseRef.data.object.sha;
       const shortSha = baseSha.slice(0, 7);
-      const branchName = `jarvis/fix-${String(args.issue_number)}-${shortSha}`;
+      // The branch name carries the base SHA so the audit trail shows
+      // which commit Jarvis branched from. A monotonic millisecond
+      // suffix keeps the name unique across re-runs on the same SHA
+      // (otherwise re-running on a fixture repo with one commit would
+      // hit "Reference already exists" on every call after the first).
+      const uniq = Date.now().toString(36);
+      const branchName = `jarvis/fix-${String(args.issue_number)}-${shortSha}-${uniq}`;
 
       await o.git.createRef({
         owner: args.owner,
