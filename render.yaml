@@ -1,0 +1,45 @@
+# Render Infrastructure-as-Code for Jarvis (Slice 13).
+#
+# One Web Service running Node 20, with a persistent disk mounted at
+# /data so the SQLite memory survives redeploys. Secrets are NOT in
+# this file — `OPENAI_API_KEY` and `GITHUB_TOKEN` are configured in the
+# Render UI under "Environment". The YAML lists them with `sync: false`
+# so Render Blueprint runs do not prompt for them at deploy time.
+#
+# Health probe hits /healthz (built into src/index.ts). The endpoint
+# returns the LIVE capability list so Render's "Healthy" indicator is
+# only green when the tool surface is actually loaded.
+
+services:
+  - type: web
+    name: jarvis
+    runtime: node
+    plan: starter
+    region: oregon
+    branch: main
+    rootDir: .
+    buildCommand: npm install && npm run build && npm run web:build
+    startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeploy: true
+    disk:
+      name: jarvis-data
+      mountPath: /data
+      sizeGB: 1
+    envVars:
+      - key: NODE_VERSION
+        value: 20.11.0
+      - key: JARVIS_HOST
+        value: 0.0.0.0
+      - key: JARVIS_DB_PATH
+        value: /data/jarvis.db
+      - key: JARVIS_REALTIME_MODEL
+        value: gpt-realtime
+      - key: JARVIS_REALTIME_VOICE
+        value: marin
+      - key: WTTR_BASE_URL
+        value: https://wttr.in
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: GITHUB_TOKEN
+        sync: false

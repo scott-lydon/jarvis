@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Jarvis — Architecture</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/mermaid/10.6.1/mermaid.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0a0e1a;
+      --panel: #1a2236;
+      --panel-2: #232c45;
+      --accent: #6366f1;
+      --accent-2: #f59e0b;
+      --good: #34d399;
+      --bad: #f87171;
+      --text: #e2e8f0;
+      --muted: #94a3b8;
+      --line: rgba(255,255,255,0.08);
+    }
+    html, body { background: var(--bg); color: var(--text); }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; }
+    .panel-2 { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; }
+    .accent { color: var(--accent); }
+    .accent-bg { background: var(--accent); }
+    .accent-2 { color: var(--accent-2); }
+    .good { color: var(--good); }
+    .bad  { color: var(--bad); }
+    .muted { color: var(--muted); }
+    .chip { background: rgba(99,102,241,0.18); color: #c7d2fe; padding: 2px 8px; border-radius: 999px; font-size: 11px; }
+    nav.sticky { background: rgba(10,14,26,0.92); backdrop-filter: blur(8px); }
+    .stat { background: linear-gradient(180deg, rgba(99,102,241,0.18), transparent); }
+    .grid-cards > div { transition: transform 120ms ease; }
+    .grid-cards > div:hover { transform: translateY(-2px); }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border-bottom: 1px solid var(--line); padding: 10px 8px; vertical-align: top; font-size: 13px; }
+    th { color: var(--muted); text-align: left; font-weight: 500; }
+    a { color: #a5b4fc; }
+    a:hover { color: #c7d2fe; }
+    .logo { width: 18px; height: 18px; display: inline-block; vertical-align: middle; }
+    .pros-cons { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .pros, .cons { padding: 8px; border-radius: 8px; font-size: 12px; }
+    .pros { background: rgba(52,211,153,0.10); border: 1px solid rgba(52,211,153,0.20); }
+    .cons { background: rgba(248,113,113,0.08); border: 1px solid rgba(248,113,113,0.18); }
+    .pros h4, .cons h4 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 4px; }
+    .pros h4 { color: var(--good); }
+    .cons h4 { color: var(--bad); }
+  </style>
+</head>
+<body class="min-h-screen">
+
+<nav class="sticky top-0 z-20 border-b border-white/5">
+  <div class="max-w-6xl mx-auto px-6 py-3 flex items-center justify-between text-sm">
+    <div class="font-semibold tracking-wider">Jarvis · architecture</div>
+    <div class="flex gap-4 muted">
+      <a href="#hero">overview</a>
+      <a href="#problem">problem</a>
+      <a href="#topology">topology</a>
+      <a href="#components">components</a>
+      <a href="#dataflow">data flow</a>
+      <a href="#decisions">decisions</a>
+      <a href="#tradeoffs">trade-offs</a>
+      <a href="#cost">cost</a>
+      <a href="#trust">trust</a>
+      <a href="#stack">stack</a>
+    </div>
+  </div>
+</nav>
+
+<section id="hero" class="max-w-6xl mx-auto px-6 pt-12 pb-8">
+  <h1 class="text-4xl font-bold tracking-tight">Jarvis</h1>
+  <p class="muted mt-2 max-w-3xl">Real-time voice assistant for frontline workers. OpenAI Realtime GA, grounded tool calling, per-user SQLite memory, deterministic flagged-author bubble, draft-PR agentic flow.</p>
+
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-3 mt-6">
+    <div class="stat panel p-4">
+      <div class="text-2xl font-semibold">≤300<span class="muted text-base">ms</span></div>
+      <div class="muted text-xs uppercase tracking-wider mt-1">barge-in to upstream cancel</div>
+    </div>
+    <div class="stat panel p-4">
+      <div class="text-2xl font-semibold">5</div>
+      <div class="muted text-xs uppercase tracking-wider mt-1">live tools, each error-mapped</div>
+    </div>
+    <div class="stat panel p-4">
+      <div class="text-2xl font-semibold">10<span class="muted text-base"> users</span></div>
+      <div class="muted text-xs uppercase tracking-wider mt-1">concurrent, isolated, load-tested</div>
+    </div>
+    <div class="stat panel p-4">
+      <div class="text-2xl font-semibold">0<span class="muted text-base"> mocks</span></div>
+      <div class="muted text-xs uppercase tracking-wider mt-1">in production code paths</div>
+    </div>
+  </div>
+</section>
+
+<section id="problem" class="max-w-6xl mx-auto px-6 py-8">
+  <h2 class="text-xl font-semibold mb-3">Problem</h2>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="panel p-5">
+      <div class="text-xs uppercase tracking-wider muted">Without Jarvis</div>
+      <ul class="mt-2 space-y-2 text-sm">
+        <li>Field techs read PRs on a 4-inch phone while wearing gloves.</li>
+        <li>"What can the assistant do?" returns a stale paragraph baked into the prompt.</li>
+        <li>Mid-conversation the server restarts; the user starts over.</li>
+        <li>The model guesses a fact and the tech trusts it because the voice is confident.</li>
+      </ul>
+    </div>
+    <div class="panel p-5" style="border-color: rgba(99,102,241,0.35)">
+      <div class="text-xs uppercase tracking-wider accent">With Jarvis</div>
+      <ul class="mt-2 space-y-2 text-sm">
+        <li>Press to talk, hear an answer grounded in a live tool call.</li>
+        <li>"What can you do?" reads from the Tool Dispatcher's live capability list.</li>
+        <li>Server restart drops the WS; the client reconnects, the new session prompt carries the rolling summary plus last 20 turns.</li>
+        <li>Un-groundable claims become "I don't know" by prompt contract and by property test.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section id="topology" class="max-w-6xl mx-auto px-6 py-8">
+  <h2 class="text-xl font-semibold mb-3">Topology</h2>
+  <div class="panel p-4 overflow-x-auto">
+    <div class="mermaid">
+flowchart LR
+  subgraph Clients [" "]
+    direction TB
+    Web["<img src='https://cdn.simpleicons.org/vite/646cff' class='logo'/> Web client (Vite + AudioWorklet)"]
+    IOS["<img src='https://cdn.simpleicons.org/swift/f05138' class='logo'/> iOS client (SwiftUI + AVAudioEngine)"]
+  end
+
+  subgraph Server ["Jarvis Server (Render Web Service)"]
+    direction TB
+    Proxy["<img src='https://cdn.simpleicons.org/nodedotjs/339933' class='logo'/> Proxy (src/proxy.ts)"]
+    Dispatcher["<img src='https://cdn.simpleicons.org/zod/3068b7' class='logo'/> Tool Dispatcher"]
+    Session["Session Manager (system prompt)"]
+    DB[("<img src='https://cdn.simpleicons.org/sqlite/003B57' class='logo'/> SQLite (WAL)")]
+    Summarizer["Rolling Summarizer"]
+  end
+
+  Web   -->|"wss /realtime · PCM16 24 kHz"| Proxy
+  IOS   -->|"wss /realtime · PCM16 24 kHz"| Proxy
+  Proxy -->|"wss · GA Realtime"| OpenAI["<img src='https://cdn.simpleicons.org/openai/000000' class='logo'/> OpenAI Realtime"]
+  Proxy --> Dispatcher
+  Dispatcher --> Wttr["<img src='https://cdn.simpleicons.org/wttrin/000000' class='logo'/> wttr.in"]
+  Dispatcher --> GH["<img src='https://cdn.simpleicons.org/github/f2efe6' class='logo'/> GitHub API"]
+  Dispatcher --> DB
+  Proxy --> Session
+  Session --> DB
+  Summarizer -->|"every 20 turns"| OpenAIChat["<img src='https://cdn.simpleicons.org/openai/000000' class='logo'/> OpenAI Chat gpt-4o-mini"]
+  Summarizer --> DB
+    </div>
+  </div>
+</section>
+
+<section id="components" class="max-w-6xl mx-auto px-6 py-8">
+  <h2 class="text-xl font-semibold mb-3">Components</h2>
+  <div class="grid md:grid-cols-2 gap-4 grid-cards">
+
+    <div class="panel p-5">
+      <div class="flex items-center justify-between">
+        <div class="font-semibold">Realtime Proxy <span class="chip">src/proxy.ts</span></div>
+        <div class="muted text-xs">single Node process</div>
+      </div>
+      <p class="text-sm mt-2">One client WS in, one upstream WS out. Filters `jarvis.*` so they never reach the model. Renames the GA audio delta to the stable name for clients. Pre-flights `session.update` with the fully-nested audio shape.</p>
+      <div class="pros-cons mt-3">
+        <div class="pros"><h4>Pros</h4>One seam to instrument. Zero protocol drift visible to clients. Deterministic barge-in path under 300 ms.</div>
+        <div class="cons"><h4>Cons</h4>One process per region; horizontal scale needs a sticky-session layer above it.</div>
+      </div>
+    </div>
+
+    <div class="panel p-5">
+      <div class="flex items-center justify-between">
+        <div class="font-semibold">Tool Dispatcher <span class="chip">src/tools/dispatcher.ts</span></div>
+        <div class="muted text-xs">zod schemas + structured errors</div>
+      </div>
+      <p class="text-sm mt-2">register / capabilities / openaiToolsSpec / dispatch. Validates args, gates by `available(env)`, wraps throws as `tool_failed` etc. The model never sees a stack trace.</p>
+      <div class="pros-cons mt-3">
+        <div class="pros"><h4>Pros</h4>Single enforcement point for the "no hallucination" contract. Capabilities are live, not hand-edited.</div>
+        <div class="cons"><h4>Cons</h4>The hand-rolled zod→JSON Schema converter is intentionally narrow; new shapes need a deliberate extension.</div>
+      </div>
+    </div>
+
+    <div class="panel p-5">
+      <div class="flex items-center justify-between">
+        <div class="font-semibold">Session Manager <span class="chip">src/session.ts</span></div>
+        <div class="muted text-xs">pure function, 8-block prompt</div>
+      </div>
+      <p class="text-sm mt-2">Composes Identity + Capabilities + Memory + Preferences + Language + Hallucination guard + Slow-tool reminder + Barge-in reminder. Property test asserts the guard cannot be silently weakened.</p>
+      <div class="pros-cons mt-3">
+        <div class="pros"><h4>Pros</h4>Auditable. Order is fixed. Every block is collapsed to one line so token budget is predictable.</div>
+        <div class="cons"><h4>Cons</h4>Prompt-level enforcement is necessary but not sufficient; that's why Slice 8 adds a deterministic post-call filter.</div>
+      </div>
+    </div>
+
+    <div class="panel p-5">
+      <div class="flex items-center justify-between">
+        <div class="font-semibold">Tool surface <span class="chip">src/tools/*</span></div>
+        <div class="muted text-xs">5 tools</div>
+      </div>
+      <p class="text-sm mt-2">wttr_get, memory_write, preference_set/clear, github_list_prs/list_issues/get_pr_comments/list_recent_merges/open_pr_for_issue. Slice 8 bubbles flagged authors to index 0 with `flagged: true`.</p>
+      <div class="pros-cons mt-3">
+        <div class="pros"><h4>Pros</h4>Each tool returns a JSON record with explicit error keys. Slow tools tag a filler the proxy speaks immediately.</div>
+        <div class="cons"><h4>Cons</h4>Adding a new tool means a zod schema, a structured-error mapping, and updates to the property test if it changes the prompt surface.</div>
+      </div>
+    </div>
+
+    <div class="panel p-5">
+      <div class="flex items-center justify-between">
+        <div class="font-semibold">SQLite memory <span class="chip">src/db.ts</span></div>
+        <div class="muted text-xs">WAL, parameterised by user_id</div>
+      </div>
+      <p class="text-sm mt-2">4 tables: users, preferences, turns, memory_summaries. Every read query joins on user_id. Load test verifies 10 users see only their own rows.</p>
+      <div class="pros-cons mt-3">
+        <div class="pros"><h4>Pros</h4>Tests run against real DB files (no mocks). Trivial to back up — copy the file.</div>
+        <div class="cons"><h4>Cons</h4>Single-writer. Move to Turso (`libsql`) for >~200 concurrent users per node.</div>
+      </div>
+    </div>
+
+    <div class="panel p-5">
+      <div class="flex items-center justify-between">
+        <div class="font-semibold">Rolling Summarizer <span class="chip">src/memory-summarizer.ts</span></div>
+        <div class="muted text-xs">gpt-4o-mini, 20-turn threshold</div>
+      </div>
+      <p class="text-sm mt-2">Fire-and-forget after every assistant turn. SELECTs the prior summary's turn_count; if `current - prior ≥ 20`, asks gpt-4o-mini to rewrite a 4-6 sentence summary. Failure preserves the prior summary.</p>
+      <div class="pros-cons mt-3">
+        <div class="pros"><h4>Pros</h4>Bounded cost; cheap. Never blocks the voice loop. Resilient to network failure.</div>
+        <div class="cons"><h4>Cons</h4>Summary lag of up to 20 turns. Long sessions re-summarize multiple times.</div>
+      </div>
+    </div>
+
+    <div class="panel p-5">
+      <div class="flex items-center justify-between">
+        <div class="font-semibold">Web client <span class="chip">web/</span></div>
+        <div class="muted text-xs">Vite + AudioWorklet</div>
+      </div>
+      <p class="text-sm mt-2">Status pill, capability chip, 32-bar AnalyserNode visualizer, debug pane, mic-permission modal, `?demo=<manifest>` + `window.__startDemo()` headless harness, 1 s × 3 WS retry.</p>
+      <div class="pros-cons mt-3">
+        <div class="pros"><h4>Pros</h4>Two AudioContexts (capture & playback) so format coercion is local; barge-in clears the queue in ~3 ms.</div>
+        <div class="cons"><h4>Cons</h4>No service-worker offline mode; a flaky connection has the visible 3-retry budget and then surfaces.</div>
+      </div>
+    </div>
+
+    <div class="panel p-5">
+      <div class="flex items-center justify-between">
+        <div class="font-semibold">iOS client <span class="chip">ios/Jarvis</span></div>
+        <div class="muted text-xs">SwiftPM, SwiftUI, AVAudioEngine</div>
+      </div>
+      <p class="text-sm mt-2">Library + executable target. URLSessionWebSocketTask with 1 s × 3 retry. AVAudioConverter from hardware rate → 24 kHz Float32. Keychain stores userId (AfterFirstUnlock). Settings sheet flips server URL without a rebuild.</p>
+      <div class="pros-cons mt-3">
+        <div class="pros"><h4>Pros</h4>Type-augmentation on UserDefaults/Keychain reads idiomatic. Persists userId across reinstalls.</div>
+        <div class="cons"><h4>Cons</h4>VoiceChat mode masks worse mic hardware; helmet-mic case wants a custom echo canceller.</div>
+      </div>
+    </div>
+
+  </div>
+</section>
+
+<section id="dataflow" class="max-w-6xl mx-auto px-6 py-8">
+  <h2 class="text-xl font-semibold mb-3">Data flow — one voice turn with a function call</h2>
+  <div class="panel p-4 overflow-x-auto">
+    <div class="mermaid">
+sequenceDiagram
+  autonumber
+  participant U as User mic
+  participant W as Web client
+  participant P as Jarvis proxy
+  participant M as OpenAI Realtime
+  participant T as Tool Dispatcher
+  participant G as GitHub API
+
+  U->>W: 50ms mic chunk (PCM16 LE 24 kHz)
+  W->>P: input_audio_buffer.append (base64)
+  P->>M: forward (UTF-8 string)
+  M-->>P: response.function_call_arguments.delta {tool, args}
+  P->>P: accumulate args
+  M-->>P: response.function_call_arguments.done
+  P->>W: jarvis.filler "Checking GitHub."
+  P->>M: conversation.item.create (assistant: filler text)
+  P->>T: dispatch(github_list_prs, args)
+  T->>G: GET /repos/.../pulls?state=open
+  G-->>T: 200 OK, [PR rows]
+  T-->>P: { prs:[...], flagged_authors:[...] }
+  P->>W: jarvis.tool_result
+  P->>M: conversation.item.create (function_call_output: JSON)
+  P->>M: response.create
+  M-->>P: response.output_audio.delta (chunked PCM16)
+  P->>W: response.audio.delta (renamed)
+  W-->>U: speaker playback
+    </div>
+  </div>
+</section>
+
+<section id="decisions" class="max-w-6xl mx-auto px-6 py-8">
+  <h2 class="text-xl font-semibold mb-3">Decisions</h2>
+  <div class="panel p-4 overflow-x-auto">
+    <table>
+      <thead><tr><th>Decision</th><th>Chose</th><th>Alternative</th><th>Why</th></tr></thead>
+      <tbody>
+        <tr><td>Realtime endpoint</td><td>OpenAI Realtime GA, no Beta header</td><td>Beta endpoint</td><td>Beta is being deprecated; mixed-mode silently breaks audio. Codified as lesson Y in <code>src/proxy.ts</code>.</td></tr>
+        <tr><td>Audio format</td><td>PCM16 LE 24 kHz mono</td><td>Opus / WebRTC</td><td>Realtime GA only accepts PCM16. WebRTC adds an opaque layer the proxy can't introspect.</td></tr>
+        <tr><td>Memory store</td><td>SQLite WAL on a 1 GB Render disk</td><td>Postgres / Redis</td><td>Per-user data is small; SQLite removes a deploy dependency and lets tests use real DBs.</td></tr>
+        <tr><td>Tool args validation</td><td>zod at dispatcher seam</td><td>Hand-rolled per-tool</td><td>One place for parse + error wrap; also generates the JSON Schema the proxy hands to OpenAI.</td></tr>
+        <tr><td>Cross-session summary</td><td>gpt-4o-mini, 20-turn gate</td><td>Summarize every turn</td><td>Cost; the threshold caps spend at roughly one call per 10 active minutes per user.</td></tr>
+        <tr><td>Hallucination guard</td><td>Prompt directive + property test + post-call filter</td><td>Per-tool refusal</td><td>The model is fallible; the deterministic filter (Slice 8) guarantees flagged PRs land at index 0 regardless of prompt obedience.</td></tr>
+        <tr><td>iOS audio engine</td><td>AVAudioEngine + AVAudioConverter</td><td>AVAudioRecorder</td><td>Recorder writes a file; we need an in-process stream at 24 kHz Float32.</td></tr>
+        <tr><td>iOS userId persistence</td><td>Keychain (AfterFirstUnlock)</td><td>UserDefaults</td><td>UserDefaults dies on reinstall; Keychain survives, preserving cross-session memory.</td></tr>
+        <tr><td>Deploy</td><td>Render Web Service + persistent disk</td><td>Fly / DO App / EC2</td><td>Render Blueprint maps cleanly to <code>render.yaml</code>, persistent disk is a first-class feature, no Dockerfile needed.</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="tradeoffs" class="max-w-6xl mx-auto px-6 py-8">
+  <h2 class="text-xl font-semibold mb-3">Trade-offs</h2>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="panel p-5">
+      <h3 class="font-semibold">SQLite single-writer</h3>
+      <p class="text-sm muted mt-1">Per-user inserts on the hot path.</p>
+      <div class="pros-cons mt-3">
+        <div class="pros"><h4>Why I accept it</h4>Per-user rows are tiny; WAL handles concurrent reads. Tests run against real DBs.</div>
+        <div class="cons"><h4>When it would bite</h4>Beyond ~200 concurrent active users per node. Migration target is Turso (`libsql`).</div>
+      </div>
+    </div>
+    <div class="panel p-5">
+      <h3 class="font-semibold">In-memory weather cache</h3>
+      <p class="text-sm muted mt-1">60 s TTL, per-process.</p>
+      <div class="pros-cons mt-3">
+        <div class="pros"><h4>Why I accept it</h4>wttr.in is slow; the cache saves the user the latency on a repeated ask.</div>
+        <div class="cons"><h4>When it would bite</h4>Multi-region deploys see TTL skew. Move to a per-region Redis if needed.</div>
+      </div>
+    </div>
+    <div class="panel p-5">
+      <h3 class="font-semibold">No upstream silent reconnect</h3>
+      <p class="text-sm muted mt-1">If OpenAI drops, the proxy closes the client; the client retries.</p>
+      <div class="pros-cons mt-3">
+        <div class="pros"><h4>Why I accept it</h4>Avoids partial-state sessions; the new session has a fresh prompt.</div>
+        <div class="cons"><h4>When it would bite</h4>A user in a moving vehicle would prefer invisible reconnect.</div>
+      </div>
+    </div>
+    <div class="panel p-5">
+      <h3 class="font-semibold">Hand-rolled zod→JSON Schema</h3>
+      <p class="text-sm muted mt-1">Covers our shapes only.</p>
+      <div class="pros-cons mt-3">
+        <div class="pros"><h4>Why I accept it</h4>Fewer dependencies, smaller audit surface.</div>
+        <div class="cons"><h4>When it would bite</h4>A new tool needing unions or refinements requires a deliberate extension.</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section id="cost" class="max-w-6xl mx-auto px-6 py-8">
+  <h2 class="text-xl font-semibold mb-3">Cost projection</h2>
+  <div class="grid md:grid-cols-2 gap-4">
+    <div class="panel p-5">
+      <h3 class="font-semibold">Per active minute</h3>
+      <canvas id="costByMinute" class="mt-3"></canvas>
+    </div>
+    <div class="panel p-5">
+      <h3 class="font-semibold">Monthly cost vs. active minutes (log)</h3>
+      <canvas id="costScale" class="mt-3"></canvas>
+    </div>
+  </div>
+</section>
+
+<section id="trust" class="max-w-6xl mx-auto px-6 py-8">
+  <h2 class="text-xl font-semibold mb-3">Trust boundaries</h2>
+  <div class="panel p-4 overflow-x-auto">
+    <div class="mermaid">
+flowchart TD
+  user["User voice"] -->|"HTTPS WS"| proxy["Jarvis proxy"]
+  proxy -->|"HTTPS WS (OPENAI_API_KEY in header)"| openai["OpenAI Realtime"]
+  proxy -->|"per-user user_id rows only"| sqlite[("SQLite (server-local)")]
+  proxy -->|"Octokit auth (GITHUB_TOKEN)"| github["GitHub API"]
+  proxy -->|"unauth GET"| wttr["wttr.in"]
+  proxy -->|"summary only, gpt-4o-mini"| openaichat["OpenAI Chat"]
+  classDef secret fill:#1f2937,stroke:#f59e0b,color:#fcd34d
+  class openai,github,sqlite,openaichat secret
+    </div>
+  </div>
+</section>
+
+<section id="stack" class="max-w-6xl mx-auto px-6 py-8">
+  <h2 class="text-xl font-semibold mb-3">Tech stack</h2>
+  <div class="grid grid-cols-2 md:grid-cols-4 gap-3">
+    <div class="panel p-4 flex items-center gap-3"><img src="https://cdn.simpleicons.org/typescript/3178c6" class="logo" />TypeScript 5.7</div>
+    <div class="panel p-4 flex items-center gap-3"><img src="https://cdn.simpleicons.org/nodedotjs/339933" class="logo" />Node 20</div>
+    <div class="panel p-4 flex items-center gap-3"><img src="https://cdn.simpleicons.org/vite/646cff" class="logo" />Vite 6</div>
+    <div class="panel p-4 flex items-center gap-3"><img src="https://cdn.simpleicons.org/sqlite/003B57" class="logo" />SQLite (better-sqlite3 WAL)</div>
+    <div class="panel p-4 flex items-center gap-3"><img src="https://cdn.simpleicons.org/openai/000000" class="logo" />OpenAI Realtime GA + Chat</div>
+    <div class="panel p-4 flex items-center gap-3"><img src="https://cdn.simpleicons.org/github/f2efe6" class="logo" />Octokit (GitHub REST)</div>
+    <div class="panel p-4 flex items-center gap-3"><img src="https://cdn.simpleicons.org/zod/3068b7" class="logo" />zod 3</div>
+    <div class="panel p-4 flex items-center gap-3"><img src="https://cdn.simpleicons.org/vitest/6e9f18" class="logo" />Vitest 2</div>
+    <div class="panel p-4 flex items-center gap-3"><img src="https://cdn.simpleicons.org/swift/f05138" class="logo" />SwiftUI / AVAudioEngine</div>
+    <div class="panel p-4 flex items-center gap-3"><img src="https://cdn.simpleicons.org/render/46e3b7" class="logo" />Render (Web Service + Disk)</div>
+    <div class="panel p-4 flex items-center gap-3"><img src="https://cdn.simpleicons.org/eslint/4b32c3" class="logo" />ESLint 9 (typescript-eslint)</div>
+    <div class="panel p-4 flex items-center gap-3"><img src="https://cdn.simpleicons.org/gitlab/fc6d26" class="logo" />GitLab mirror (Gauntlet)</div>
+  </div>
+</section>
+
+<footer class="max-w-6xl mx-auto px-6 py-12 muted text-sm">
+  <div>Source: <a href="https://github.com/scott-lydon/jarvis">github.com/scott-lydon/jarvis</a> · mirror: <a href="https://labs.gauntletai.com/scottlydon/jarvis">labs.gauntletai.com/scottlydon/jarvis</a></div>
+  <div class="mt-1">Deployed: Render Web Service · Health: <code>/healthz</code> reports the live capability list.</div>
+</footer>
+
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'dark',
+    securityLevel: 'loose',
+    themeVariables: {
+      background: '#0a0e1a',
+      primaryColor: '#1a2236',
+      primaryBorderColor: '#6366f1',
+      primaryTextColor: '#e2e8f0',
+      lineColor: '#94a3b8',
+      tertiaryColor: '#232c45',
+    },
+  });
+
+  // Per-minute cost: Realtime audio (input+output) plus a fractional
+  // gpt-4o-mini summarizer hit averaged over a 20-turn window.
+  new Chart(document.getElementById('costByMinute'), {
+    type: 'bar',
+    data: {
+      labels: ['Realtime audio (in)', 'Realtime audio (out)', 'gpt-4o-mini (summary)', 'GitHub API', 'wttr.in', 'SQLite'],
+      datasets: [{
+        label: 'USD per active minute',
+        data: [0.030, 0.050, 0.003, 0.0, 0.0, 0.0],
+        backgroundColor: ['#6366f1', '#818cf8', '#f59e0b', '#94a3b8', '#94a3b8', '#94a3b8'],
+      }],
+    },
+    options: {
+      indexAxis: 'y',
+      scales: { x: { beginAtZero: true, ticks: { color: '#94a3b8' } }, y: { ticks: { color: '#e2e8f0' } } },
+      plugins: { legend: { labels: { color: '#e2e8f0' } } },
+    },
+  });
+
+  new Chart(document.getElementById('costScale'), {
+    type: 'line',
+    data: {
+      labels: ['10 min/day', '60 min/day', '600 min/day', '6,000 min/day', '60,000 min/day'],
+      datasets: [{
+        label: 'Monthly $ at this active-time tier',
+        data: [25, 159, 1500, 14990, 149800],
+        borderColor: '#6366f1',
+        backgroundColor: 'rgba(99,102,241,0.18)',
+        fill: true,
+        tension: 0.3,
+      }],
+    },
+    options: {
+      scales: {
+        y: { type: 'logarithmic', ticks: { color: '#94a3b8' } },
+        x: { ticks: { color: '#e2e8f0' } },
+      },
+      plugins: { legend: { labels: { color: '#e2e8f0' } } },
+    },
+  });
+</script>
+
+</body>
+</html>
