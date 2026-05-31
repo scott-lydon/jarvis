@@ -4,7 +4,10 @@
 // and the OpenAI Realtime proxy. Run via `npm run dev` (tsx watch) or
 // `npm start` after `npm run build`.
 
-import { createServer, type IncomingMessage } from 'node:http';
+import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createReadStream, existsSync, statSync } from 'node:fs';
+import { extname, join, normalize, resolve as resolvePath } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { WebSocketServer } from 'ws';
 import type { WebSocket as ClientWS } from 'ws';
 
@@ -43,15 +46,43 @@ function main(): void {
   const dispatcher = new ToolDispatcher();
   registerAllTools(dispatcher);
 
+  // Resolve the static web bundle directory once. In production
+  // (Render's `npm run build && npm run web:build`) the bundle lives at
+  // <repo>/web/dist relative to the compiled `dist/index.js`. We resolve
+  // off `import.meta.url` so the path is correct regardless of where the
+  // process was launched from.
+  const moduleDir = fileURLToPath(new URL('.', import.meta.url));
+  const staticRoot = resolvePath(moduleDir, '..', 'web', 'dist');
+  const staticAvailable = existsSync(staticRoot) && existsSync(join(staticRoot, 'index.html'));
+  if (!staticAvailable) {
+    log.warn({
+      event: 'static.bundle_missing',
+      staticRoot,
+      hint: 'Run `npm run web:build` to produce web/dist/. The /healthz API path will still work, but / will 404.',
+    });
+  }
+
   const http = createServer((req, res) => {
-    // Healthcheck endpoint for Render/Fly probes.
-    if (req.url === '/healthz') {
+    const url = req.url ?? '/';
+    // Healthcheck endpoint for Render/Fly probes — JSON path always wins.
+    if (url === '/healthz') {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         status: 'ok',
         ts: new Date().toISOString(),
         capabilities: dispatcher.capabilities(env).map((c) => ({ name: c.name, available: c.available })),
       }));
+      return;
+    }
+    // /realtime is the WebSocketServer's path; never serve a body here.
+    // The WS upgrade hits a separate handler attached by `new WebSocketServer({...})`.
+    if (url === '/realtime' || url.startsWith('/realtime?')) {
+      res.writeHead(426, { 'Content-Type': 'text/plain' });
+      res.end('upgrade required');
+      return;
+    }
+    if (staticAvailable) {
+      serveStatic(staticRoot, url, res);
       return;
     }
     res.writeHead(404, { 'Content-Type': 'text/plain' });
@@ -139,6 +170,74 @@ function pickHeader(value: string | readonly string[] | undefined): string | und
   if (value === undefined) return undefined;
   if (typeof value === 'string') return value;
   return value[0];
+}
+
+const STATIC_MIME: Readonly<Record<string, string>> = {
+  '.html': 'text/html; charset=utf-8',
+  '.js':   'application/javascript; charset=utf-8',
+  '.mjs':  'application/javascript; charset=utf-8',
+  '.css':  'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg':  'image/svg+xml',
+  '.png':  'image/png',
+  '.jpg':  'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif':  'image/gif',
+  '.ico':  'image/x-icon',
+  '.woff':  'font/woff',
+  '.woff2': 'font/woff2',
+  '.map':  'application/json',
+};
+
+/**
+ * Serve a file out of the static web bundle directory. Hand-rolled
+ * (no Express / no serve-static) so we keep the dependency list tight.
+ *
+ * Behavior:
+ *   - "/"            -> staticRoot/index.html
+ *   - "/foo/bar"     -> staticRoot/foo/bar (404 if missing)
+ *   - any path with ".." -> 400 (path-traversal guard)
+ *
+ * Why a guard against ".." in the URL: even though Node's `path.join`
+ * collapses traversal, surfacing the request as a 400 makes the failure
+ * mode obvious in the logs instead of returning a confusing 404.
+ */
+function serveStatic(root: string, urlPath: string, res: ServerResponse): void {
+  // Strip query string and decode.
+  const pathOnly = urlPath.split('?')[0] ?? '/';
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathOnly);
+  } catch {
+    res.writeHead(400, { 'Content-Type': 'text/plain' });
+    res.end('bad path encoding');
+    return;
+  }
+  if (decoded.includes('..')) {
+    res.writeHead(400, { 'Content-Type': 'text/plain' });
+    res.end('path traversal not allowed');
+    return;
+  }
+  const rel = decoded === '/' ? 'index.html' : decoded.replace(/^\/+/, '');
+  const abs = normalize(join(root, rel));
+  if (!abs.startsWith(root)) {
+    res.writeHead(400, { 'Content-Type': 'text/plain' });
+    res.end('path escapes static root');
+    return;
+  }
+  if (!existsSync(abs) || !statSync(abs).isFile()) {
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('not found');
+    return;
+  }
+  const mime = STATIC_MIME[extname(abs).toLowerCase()] ?? 'application/octet-stream';
+  res.writeHead(200, {
+    'Content-Type': mime,
+    // index.html should NEVER cache (we want clients to pick up new builds);
+    // hashed assets under /assets/ may cache aggressively.
+    'Cache-Control': abs.endsWith('index.html') ? 'no-store' : 'public, max-age=31536000, immutable',
+  });
+  createReadStream(abs).pipe(res);
 }
 
 try {

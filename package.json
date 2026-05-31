@@ -18,7 +18,7 @@
     "test:watch": "vitest",
     "test:property": "vitest run tests/property",
     "test:load": "vitest run tests/load --testTimeout=120000",
-    "smoke:wttr": "vitest run tests/smoke/wttr.test.ts",
+    "smoke:wttr": "JARVIS_REQUIRE_LIVE_WTTR=1 vitest run tests/smoke/wttr.test.ts",
     "smoke:openai": "vitest run tests/smoke/openai-realtime.test.ts --testTimeout=30000",
     "smoke:deployed": "vitest run tests/smoke/deployed.test.ts",
     "smoke:slice11": "JARVIS_REQUIRE_LIVE_GITHUB=1 vitest run tests/smoke/github-agentic.test.ts --testTimeout=30000",
