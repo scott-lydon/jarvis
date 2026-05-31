@@ -1,0 +1,42 @@
+# Node
+node_modules/
+dist/
+build/
+*.log
+.npm/
+.pnpm-store/
+
+# Env / secrets — NEVER commit
+.env
+.env.*
+!.env.example
+
+# Local databases (per-user SQLite memory store)
+*.db
+*.db-shm
+*.db-wal
+data/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Test / coverage
+coverage/
+.nyc_output/
+*.lcov
+
+# Conveyor / pipeline artifacts
+.conveyor/voice-cache/
+.conveyor/capture-cache/
+.conveyor/*.mp4
+.conveyor/*.mp3
+.conveyor/*.webm
+
+# Build
+*.tsbuildinfo
