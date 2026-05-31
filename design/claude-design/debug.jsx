@@ -143,6 +143,18 @@ function DebugApp() {
 // ─────────────────────────────────────────────────────────────
 // TOP BAR — title, force-state toolbar, back link
 // ─────────────────────────────────────────────────────────────
+// Side-effect hints for FORCE STATE — surfaced as title= and aria-label so a
+// developer / founder knows exactly what each state does to the main screen.
+// Added post-UX-review (2026-05-31) per the debug-critic finding that the
+// buttons had no labeling for their side effects.
+const FORCE_STATE_HINT = {
+  idle:        'Empty the conversation. Mic dimmed but reactive.',
+  listening:   'Seed transcript + start live mic capture. No upstream call.',
+  thinking:    'Seed transcript + render the routing indicator. No tool fires.',
+  speaking:    'Seed transcript + last assistant turn streams with caret. No audio plays.',
+  interrupted: 'Transient (~400ms): red ring, X glyph. Auto-reverts to listening.',
+};
+
 function TopBar({ forcedState, setForcedState }) {
   // 'interrupted' is the transient barge-in cue (US-04). Forceable here so
   // a tester can land directly in that state without doing the voice dance.
@@ -183,17 +195,30 @@ function TopBar({ forcedState, setForcedState }) {
           fontSize: 10, color: 'var(--fg-muted)', letterSpacing: '0.06em',
           textTransform: 'uppercase', paddingLeft: 4,
         }}>force state</span>
+        {/* `title` attributes added post-UX-review so a developer hovering
+            knows what each state DOES (vs. just painting the badge). Per the
+            debug-critic finding: "a founder mid-demo will tap 'speaking'
+            expecting audio and nothing happens" — the tooltips are the cheap
+            fix; full two-zone restructure (preview vs. apply-to-main) lands
+            when the inject pipe is wired in Slice 1. */}
         {opts.map(o => (
-          <button key={o} onClick={() => setForcedState(o)} style={{
-            padding: '5px 10px', fontSize: 11.5, fontFamily: 'var(--f-mono)',
-            color: forcedState === o ? 'var(--fg)' : 'var(--fg-muted)',
-            background: forcedState === o ? 'var(--surface-3)' : 'transparent',
-            border: `1px solid ${forcedState === o ? 'var(--border-strong)' : 'transparent'}`,
-            borderRadius: 5,
-          }}>{o}</button>
+          <button
+            key={o}
+            onClick={() => setForcedState(o)}
+            title={FORCE_STATE_HINT[o]}
+            aria-label={`Force ${o} — ${FORCE_STATE_HINT[o]}`}
+            style={{
+              padding: '5px 10px', fontSize: 11.5, fontFamily: 'var(--f-mono)',
+              color: forcedState === o ? 'var(--fg)' : 'var(--fg-muted)',
+              background: forcedState === o ? 'var(--surface-3)' : 'transparent',
+              border: `1px solid ${forcedState === o ? 'var(--border-strong)' : 'transparent'}`,
+              borderRadius: 5,
+            }}
+          >{o}</button>
         ))}
         <a
           href={`index.html?dev=1#force=${forcedState}`}
+          title="Open the main screen forced into this state (new tab)"
           style={{
             marginLeft: 4, padding: '5px 9px',
             fontSize: 10.5, color: 'var(--accent)',
@@ -353,7 +378,21 @@ function StateColumn({ events, tokens, audioFrames }) {
 
         <Divider/>
 
-        <KV label="AUDIO FRAMES OUT"  value={<span className="tnum">{audioFrames.toLocaleString()}</span>}/>
+        {/* Post-UX-review (2026-05-31) telemetry refactor. AUDIO FRAMES OUT is
+            a vanity counter — high number, no actionable signal. The rows
+            below map directly to QA_ADVERSARY.md attack categories so a
+            developer reproducing a bug can read them at a glance:
+              LAST UPSTREAM EVENT → J-CAT-1 (Realtime API regression)
+              WEATHER CACHE AGE   → US-08 60s TTL + no-reused-as-fresh rule
+              MEMORY SCOPE        → J-CAT-6 (per-user isolation)
+              FIRST-AUDIO p99     → US-01 first-audio-frame latency budget. */}
+        <KV label="LAST UPSTREAM EVENT" value={<span className="mono" style={{ color: 'var(--info)' }}>response.output_audio.delta</span>}/>
+        <KV label="WEATHER CACHE AGE"   value={<span className="tnum">12s <span style={{ color: 'var(--fg-dim)' }}>(ttl 60s)</span></span>}/>
+        <KV label="MEMORY SCOPE"        value={<span className="mono">user_id=op_3a91</span>}/>
+        <KV label="FIRST-AUDIO p99"     value={<span className="tnum">1.18s <span style={{ color: 'var(--fg-dim)' }}>(budget 1.5s)</span></span>}/>
+
+        <Divider/>
+
         <KV label="TOKENS IN / OUT"   value={<span className="tnum">{tokens.in.toLocaleString()} / {tokens.out.toLocaleString()}</span>}/>
         <KV label="TOOL CALLS"        value={<span className="tnum">3 weather · 1 github · 1 memory_write</span>}/>
         <KV label="ERRORS"            value={<span style={{ color: 'var(--warn)' }}>1 warn · 0 error</span>}/>
