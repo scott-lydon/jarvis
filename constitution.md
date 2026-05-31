@@ -90,15 +90,41 @@ Sourced from `~/Documents/Claude/Projects/Gauntlet/demo-video-learnings.md` §3 
 
 ---
 
-## 6. Environment variables — required before Slice 1
+## 6. Environment variables
 
-- `OPENAI_API_KEY` — OpenAI Realtime GA endpoint. Must be a fresh-rotated key, not a hand-me-down from the Sivraj build.
-- `GITHUB_TOKEN` — GitHub REST API. Scopes: `repo`, `workflow`, `read:org`.
-- `WTTR_BASE_URL` — optional; defaults to `https://wttr.in`. Set to a local stub server in tests.
-- `JARVIS_DB_PATH` — optional; defaults to `./data/jarvis.db`.
-- `PORT` — optional; defaults to `3000`.
+### Required before Slice 1
 
-`.env` is `.gitignore`'d. `.env.example` is committed with empty values and inline comments. Secrets are entered via a one-shot interactive script (mirror of `~/.local/bin/conveyor-secret set`), never hand-edited.
+- `OPENAI_API_KEY` — OpenAI Realtime GA endpoint. Must be a fresh-rotated key, not a hand-me-down from the Sivraj build. Format `sk-…` or `sk-proj-…`.
+
+### Required before Slice 9 (Render deploy)
+
+- `GITHUB_TOKEN` — GitHub REST API for the Octokit client at runtime. Fine-grained personal access token with permissions:
+  - **Contents:** Read and write (branch + commit + push for the agentic pull request flow, US-12).
+  - **Issues:** Read (US-07 list, US-12 read issue body).
+  - **Pull requests:** Read and write (US-07 list, US-07 read comments, US-12 create PR).
+  - **Metadata:** Read (auto-granted, mandatory).
+  - Workflows, Account permissions, and other Repository permissions: **No access**.
+- Earlier classic-scope notation (`repo`, `workflow`, `read:org`) was over-specified; the fine-grained permissions above are the actual minimum needed by the tool surface in `src/tools/github.ts`.
+
+### Local-dev shortcut (avoids generating a token until Slice 9)
+
+For local development Slices 5–8, reuse the existing `gh` CLI auth instead of generating a separate token:
+
+```bash
+GITHUB_TOKEN=$(gh auth token) npm run dev
+```
+
+Verified working on this Mac: `gh auth status` reports token scopes `gist`, `read:org`, `repo`, `workflow` — superset of what Octokit needs. The token is in the macOS keyring, not in any committed file.
+
+### Optional config (with defaults)
+
+- `WTTR_BASE_URL` — defaults to `https://wttr.in`. Set to a local stub server in tests.
+- `JARVIS_DB_PATH` — defaults to `./data/jarvis.db`.
+- `PORT` — defaults to `3000`.
+
+### Secret handling rules
+
+`.env` is `.gitignore`'d. `.env.example` is committed with empty values and inline comments. Secrets are entered via the macOS `osascript` hidden-answer dialog (mirror of `~/.local/bin/conveyor-secret-gui`), never typed into a terminal command line and never hand-edited into `.env`.
 
 ---
 
