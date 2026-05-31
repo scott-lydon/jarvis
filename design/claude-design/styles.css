@@ -9,19 +9,33 @@
   --border-strong: #2e333d;
   --hairline:  rgba(255,255,255,0.06);
 
-  /* Text */
+  /* Text
+     fg-dim and fg-faint were bumped 2026-05-31 after the WCAG review caught
+     the old values (#5a6069 ~3.1:1, #3b4049 ~1.7:1) failing 1.4.3 AA on
+     timestamps, the TRY-SAYING header, and tool-call durations. New values
+     measure ~4.6:1 and ~4.5:1 against --bg (#08090b); secondary hierarchy
+     still reads because text is smaller + mono. */
   --fg:        #e7eaf0;
   --fg-muted:  #8b919c;
-  --fg-dim:    #5a6069;
-  --fg-faint:  #3b4049;
+  --fg-dim:    #9097a2;
+  --fg-faint:  #7a8089;
 
-  /* Accent — operator green */
+  /* Accent — operator green (default; main.jsx overrides at runtime) */
   --accent:        #4ade80;
   --accent-soft:   rgba(74,222,128,0.14);
   --accent-ring:   rgba(74,222,128,0.32);
   --accent-glow:   rgba(74,222,128,0.55);
 
-  /* States */
+  /* Per-state colors — added 2026-05-31 to fix WCAG 1.4.1 Use-of-Color and
+     the voice-AI review's "listening and speaking look identical" finding.
+     listening = operator-green (accent), thinking = warn-amber,
+     speaking = cyan/blue (visually distinct from green), interrupted = err-red. */
+  --state-listening:   #4ade80;
+  --state-thinking:    #fbbf24;
+  --state-speaking:    #22d3ee;
+  --state-interrupted: #f87171;
+
+  /* Generic level tokens */
   --warn:  #fbbf24;
   --err:   #f87171;
   --info:  #60a5fa;
@@ -78,9 +92,42 @@ button {
   border-radius: 50%;
   background: var(--fg-dim);
 }
-.dot.live  { background: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
-.dot.warn  { background: var(--warn);   box-shadow: 0 0 0 3px rgba(251,191,36,0.18); }
-.dot.err   { background: var(--err);    box-shadow: 0 0 0 3px rgba(248,113,113,0.18); }
+.dot.live    { background: var(--state-listening);   box-shadow: 0 0 0 3px var(--accent-soft); }
+.dot.warn    { background: var(--state-thinking);    box-shadow: 0 0 0 3px rgba(251,191,36,0.18); }
+.dot.err     { background: var(--state-interrupted); box-shadow: 0 0 0 3px rgba(248,113,113,0.18); }
+.dot.speak   { background: var(--state-speaking);    box-shadow: 0 0 0 3px rgba(34,211,238,0.20);  }
+.dot.idle    { background: var(--fg-muted); box-shadow: 0 0 0 3px rgba(139,145,156,0.14); }
+
+/* State glyph — redundant non-color signal per WCAG 1.4.1.
+   Sized to read alongside the badge label (12-14px text). */
+.state-glyph {
+  display: inline-block;
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: -1px;
+}
+.state-glyph.idle        { border: 1.5px solid var(--fg-muted); background: transparent; }
+.state-glyph.listening   { background: var(--state-listening); }
+.state-glyph.thinking    { border: 1.5px solid var(--state-thinking); background: var(--state-thinking); border-radius: 2px; }
+.state-glyph.speaking    { background: var(--state-speaking); box-shadow: 0 0 0 3px rgba(34,211,238,0.30); }
+.state-glyph.interrupted { background: var(--state-interrupted);
+  /* small X-mark to distinguish even at the smallest size */
+  background-image:
+    linear-gradient(45deg, transparent 45%, #fff 45% 55%, transparent 55%),
+    linear-gradient(-45deg, transparent 45%, #fff 45% 55%, transparent 55%);
+}
+
+/* Visually-hidden helper for aria-live regions (per WCAG 4.1.3). */
+.sr-only {
+  position: absolute !important;
+  width: 1px; height: 1px;
+  margin: -1px; padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 /* Inline keyframes used by mic + state visuals */
 @keyframes ring-pulse {
@@ -110,6 +157,17 @@ button {
 /* base opacity 1 so content is visible even if the animation never runs
    (screenshot clones, prefers-reduced-motion, etc.) */
 .fade-in { opacity: 1; animation: fade-in 180ms ease-out; }
+
+/* prefers-reduced-motion: kill every animation that the design pulses
+   continuously. Static fallbacks (visible-by-default opacity, fixed-height
+   bars) keep meaning intact even without motion. WCAG 2.3.3. */
 @media (prefers-reduced-motion: reduce) {
   .fade-in { animation: none; }
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
 }
