@@ -1,0 +1,10 @@
+{
+  "name": "OpenEMR PR walkthrough",
+  "description": "60-second scripted demo: ask Jarvis to summarise the openemr PR queue, then to flag PRs from sjpadgett. Drives the assistant through a known happy-path without a real microphone. Used by Playwright/Puppeteer for demo capture.",
+  "steps": [
+    { "delayMs": 1500, "text": "What can you do right now?" },
+    { "delayMs": 6000, "text": "List the most recent open pull requests on the openemr/openemr repository." },
+    { "delayMs": 9000, "text": "Always flag pull requests from sjpadgett." },
+    { "delayMs": 5000, "text": "What's the weather in Austin?" }
+  ]
+}

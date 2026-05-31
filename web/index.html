@@ -51,6 +51,31 @@
       </footer>
     </main>
 
+    <!-- Slice 9: WebSocket-retry banner. main.ts toggles data-open. -->
+    <div id="retry-banner" class="retry-banner" role="status" aria-live="polite" data-open="false">
+      Reconnecting…
+    </div>
+
+    <!-- Slice 9: Mic permission denied modal. main.ts toggles data-open. -->
+    <div id="mic-perm-modal" class="modal-backdrop" role="dialog" aria-modal="true"
+         aria-labelledby="mic-perm-title" data-open="false">
+      <div class="modal">
+        <div class="modal-header">
+          <h2 id="mic-perm-title">Microphone permission needed</h2>
+          <button type="button" class="modal-close" id="mic-perm-close" aria-label="Close">×</button>
+        </div>
+        <div class="modal-body">
+          <p>Jarvis needs microphone access to listen. Your browser blocked the request.</p>
+          <ol>
+            <li>Click the lock or tune icon in the address bar.</li>
+            <li>Find <code>Microphone</code> and change it to <code>Allow</code>.</li>
+            <li>Reload the page and tap <code>Tap to talk</code> again.</li>
+          </ol>
+          <p id="mic-perm-detail" style="color: var(--fg-dim); font-size: 12px;"></p>
+        </div>
+      </div>
+    </div>
+
     <script type="module" src="./main.ts"></script>
   </body>
 </html>

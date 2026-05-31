@@ -1,33 +1,41 @@
 // Jarvis web client — voice loop.
 //
-// Architecture:
-//   - One WebSocket to /realtime carries OpenAI Realtime events both ways
-//     plus a few `jarvis.*` local-control events.
-//   - Mic capture: getUserMedia → AudioContext @ 24 kHz → mic-capture
-//     AudioWorklet that downsamples to Int16 PCM and posts back to main
-//     thread. Main thread base64-encodes and pushes
-//     `input_audio_buffer.append` frames upstream.
-//   - Audio playback: server `response.audio.delta` (already renamed from
-//     `response.output_audio.delta` by the proxy) carries base64 PCM16
-//     @ 24 kHz. Decoded into Float32 and queued to a pcm-player worklet.
-//   - Bars: AnalyserNode on the playback bus + animation frame loop.
-//   - Barge-in: when the mic worklet flags RMS > VAD threshold AND we
-//     are currently in `speaking` state, the client (a) clears its own
-//     play queue (≤200ms target, US-04), (b) sends a `jarvis.barge_in`
-//     event so the proxy emits `response.cancel` upstream (≤300ms target).
+// Slice 9 polish layered on top of the original Slice 1 voice loop:
 //
-// Persistence: userId is stored in localStorage so the same browser
-// hits the same memory row across reloads.
+//   - Mic permission denied modal (Slice 9 / lesson F4): when
+//     `getUserMedia` rejects with NotAllowedError, surface a modal that
+//     explains step-by-step how to re-enable the mic. The error pill
+//     used to be the only feedback; modal is now the primary path.
+//   - WebSocket auto-retry with 1 s backoff up to 3 attempts (plan §2.7):
+//     transient close codes (1006, 1001, 1011) trigger an exponential
+//     reconnect. After 3 failures we surface the error and stop.
+//   - `?demo=<manifest>` URL handler + `window.__demoReady` /
+//     `window.__startDemo()` globals (lesson F8): a deterministic way to
+//     drive the client from a Playwright/Puppeteer harness for demo
+//     recording without a real microphone. The manifest is a remote JSON
+//     file (or the literal `manifest.json` in `/public/demo/`) describing
+//     a sequence of pre-recorded prompts to play back. Manifests do not
+//     replace the real mic; they only run when explicitly requested.
+//
+// All overlays bound their height per CLAUDE.md (max-h: min(90vh, ...))
+// so the close X stays reachable on a 720p laptop screen.
 
 const STATUS_IDLE = 'idle';
 const STATUS_LISTENING = 'listening';
 const STATUS_THINKING = 'thinking';
 const STATUS_SPEAKING = 'speaking';
 const STATUS_ERROR = 'error';
-type Status = typeof STATUS_IDLE | typeof STATUS_LISTENING | typeof STATUS_THINKING | typeof STATUS_SPEAKING | typeof STATUS_ERROR;
+type Status =
+  | typeof STATUS_IDLE
+  | typeof STATUS_LISTENING
+  | typeof STATUS_THINKING
+  | typeof STATUS_SPEAKING
+  | typeof STATUS_ERROR;
 
 const TARGET_RATE = 24_000;
 const NUM_BARS = 32;
+const MAX_RETRIES = 3;
+const RETRY_BACKOFF_MS = 1_000;
 
 interface JarvisToolResult { type: 'jarvis.tool_result'; tool: string; ok: boolean; durationMs: number; result: unknown }
 interface JarvisFiller { type: 'jarvis.filler'; text: string; tool: string }
@@ -53,6 +61,23 @@ type ServerEvent =
   | ErrEvt
   | { type: string; [k: string]: unknown };
 
+interface DemoManifest {
+  readonly name: string;
+  readonly steps: readonly DemoStep[];
+}
+interface DemoStep {
+  readonly delayMs?: number;
+  readonly text?: string;       // text-only: shown as caption, then sent as a typed message upstream.
+  readonly audioUrl?: string;   // optional pre-recorded PCM16 24 kHz to inject as user input.
+}
+
+declare global {
+  interface Window {
+    __demoReady?: boolean;
+    __startDemo?: (manifestUrlOrObject: string | DemoManifest) => Promise<void>;
+  }
+}
+
 class JarvisClient {
   private ws: WebSocket | null = null;
   private micCtx: AudioContext | null = null;
@@ -67,16 +92,23 @@ class JarvisClient {
   private barEls: HTMLElement[] = [];
   private analyserBuf = new Uint8Array(0);
   private capturedSamplesSinceCommit = 0;
+  private retriesUsed = 0;
+  private intentionalClose = false;
 
   constructor() {
     this.userId = localStorage.getItem('jarvis.userId') ?? crypto.randomUUID();
     localStorage.setItem('jarvis.userId', this.userId);
     this.setupBars();
     this.setupButton();
+    this.setupModal();
     this.tickBars();
     this.devSetUser();
-    this.fetchCaps();
+    void this.fetchCaps();
+    this.setupDemoGlobals();
+    this.maybeAutoStartDemo();
   }
+
+  // ----- DOM setup ----------------------------------------------------
 
   private setupBars(): void {
     const host = document.getElementById('bars');
@@ -95,6 +127,42 @@ class JarvisClient {
     btn.addEventListener('click', () => {
       if (this.active) void this.stop(); else void this.start();
     });
+  }
+
+  private setupModal(): void {
+    const close = document.getElementById('mic-perm-close');
+    if (close !== null) {
+      close.addEventListener('click', () => { this.hideMicModal(); });
+    }
+    const backdrop = document.getElementById('mic-perm-modal');
+    if (backdrop !== null) {
+      backdrop.addEventListener('click', (ev) => {
+        // Click on backdrop (not on the modal contents) closes.
+        if (ev.target === backdrop) this.hideMicModal();
+      });
+    }
+    document.addEventListener('keydown', (ev) => {
+      if (ev.key === 'Escape') this.hideMicModal();
+    });
+  }
+
+  private showMicModal(detail: string): void {
+    const modal = document.getElementById('mic-perm-modal');
+    if (modal !== null) modal.setAttribute('data-open', 'true');
+    const det = document.getElementById('mic-perm-detail');
+    if (det !== null) det.textContent = detail;
+  }
+
+  private hideMicModal(): void {
+    const modal = document.getElementById('mic-perm-modal');
+    if (modal !== null) modal.setAttribute('data-open', 'false');
+  }
+
+  private setRetryBanner(open: boolean, message?: string): void {
+    const banner = document.getElementById('retry-banner');
+    if (banner === null) return;
+    banner.setAttribute('data-open', open ? 'true' : 'false');
+    if (message !== undefined) banner.textContent = message;
   }
 
   private setStatus(s: Status, caption?: string): void {
@@ -129,7 +197,7 @@ class JarvisClient {
     try {
       const res = await fetch('/healthz');
       if (!res.ok) return;
-      const json = await res.json() as { capabilities: Array<{ name: string; available: boolean }> };
+      const json = await res.json() as { capabilities: { name: string; available: boolean }[] };
       const enabled = json.capabilities.filter((c) => c.available).map((c) => c.name);
       const chip = document.getElementById('cap-chip');
       if (chip !== null) {
@@ -142,9 +210,13 @@ class JarvisClient {
     }
   }
 
+  // ----- Start / stop -------------------------------------------------
+
   async start(): Promise<void> {
     if (this.active) return;
     this.active = true;
+    this.intentionalClose = false;
+    this.retriesUsed = 0;
     const btn = document.getElementById('mic-btn') as HTMLButtonElement | null;
     if (btn !== null) {
       btn.setAttribute('aria-pressed', 'true');
@@ -156,21 +228,32 @@ class JarvisClient {
       await this.openAudio();
       this.openSocket();
     } catch (cause) {
+      const isPermDenied = cause instanceof DOMException && cause.name === 'NotAllowedError';
       const message = cause instanceof Error ? cause.message : String(cause);
-      this.setStatus(STATUS_ERROR, `Failed to start: ${message}`);
+      if (isPermDenied) {
+        this.showMicModal(`Browser said: ${message}`);
+        this.setStatus(STATUS_ERROR, 'Microphone permission denied.');
+      } else {
+        this.setStatus(STATUS_ERROR, `Failed to start: ${message}`);
+      }
       this.devLog(`start failed: ${message}`);
       this.active = false;
+      this.resetButton();
     }
+  }
+
+  private resetButton(): void {
+    const btn = document.getElementById('mic-btn') as HTMLButtonElement | null;
+    if (btn === null) return;
+    btn.setAttribute('aria-pressed', 'false');
+    const label = btn.querySelector('.mic-label');
+    if (label !== null) label.textContent = 'Tap to talk';
   }
 
   async stop(): Promise<void> {
     this.active = false;
-    const btn = document.getElementById('mic-btn') as HTMLButtonElement | null;
-    if (btn !== null) {
-      btn.setAttribute('aria-pressed', 'false');
-      const label = btn.querySelector('.mic-label');
-      if (label !== null) label.textContent = 'Tap to talk';
-    }
+    this.intentionalClose = true;
+    this.resetButton();
     if (this.ws !== null) {
       try { this.ws.close(1000, 'user_stopped'); } catch { /* ignore */ }
       this.ws = null;
@@ -186,7 +269,10 @@ class JarvisClient {
     if (this.playerCtx !== null) { await this.playerCtx.close(); this.playerCtx = null; }
     this.setStatus(STATUS_IDLE, '');
     this.devSetConn('disconnected');
+    this.setRetryBanner(false);
   }
+
+  // ----- Audio context + worklets ------------------------------------
 
   private async openAudio(): Promise<void> {
     const stream = await navigator.mediaDevices.getUserMedia({
@@ -195,9 +281,6 @@ class JarvisClient {
     });
     this.micStream = stream;
 
-    // Two contexts: one for capture (input @ 24kHz) and one for playback.
-    // Browsers often refuse to set sampleRate exactly; we downsample in
-    // the capture worklet defensively.
     this.micCtx = new AudioContext({ sampleRate: TARGET_RATE, latencyHint: 'interactive' });
     await this.micCtx.audioWorklet.addModule('./pcm-recorder.js');
     const src = this.micCtx.createMediaStreamSource(stream);
@@ -209,7 +292,6 @@ class JarvisClient {
       const pcm = ev.data.pcm;
       const samples = pcm.byteLength / 2;
       this.capturedSamplesSinceCommit += samples;
-      // VAD-like cue for client-side barge-in
       if (this.status === STATUS_SPEAKING && ev.data.rms > 0.04) {
         this.handleBargeIn();
       }
@@ -225,10 +307,11 @@ class JarvisClient {
     this.playerWorklet.connect(this.analyser);
     this.analyser.connect(this.playerCtx.destination);
 
-    // Resume contexts in case the browser created them suspended.
     if (this.micCtx.state === 'suspended') await this.micCtx.resume();
     if (this.playerCtx.state === 'suspended') await this.playerCtx.resume();
   }
+
+  // ----- WebSocket with retry ----------------------------------------
 
   private openSocket(): void {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -238,17 +321,29 @@ class JarvisClient {
     this.devSetConn('connecting');
     ws.addEventListener('open', () => {
       this.devSetConn('open');
-      // Client tells the server which user this is. The server validates
-      // UUID v4 shape; if it rejects, it mints a new one and tells us.
-      // (No header upgrade in browsers, so we send it as the first event.)
+      this.retriesUsed = 0;
+      this.setRetryBanner(false);
       this.sendUpstream({ type: 'jarvis.client_hello', userId: this.userId });
     });
     ws.addEventListener('close', (e) => {
       this.devSetConn(`closed (${String(e.code)})`);
-      if (this.active) this.setStatus(STATUS_ERROR, `Connection closed (${String(e.code)}).`);
+      if (this.intentionalClose || !this.active) return;
+      // Slice 9: auto-retry transient closes up to MAX_RETRIES.
+      if (this.retriesUsed < MAX_RETRIES) {
+        this.retriesUsed += 1;
+        const delayMs = RETRY_BACKOFF_MS * this.retriesUsed;
+        this.setRetryBanner(true, `Reconnecting (${String(this.retriesUsed)}/${String(MAX_RETRIES)})…`);
+        this.devLog(`reconnect attempt ${String(this.retriesUsed)} after ${String(delayMs)}ms`);
+        window.setTimeout(() => {
+          if (this.active && !this.intentionalClose) this.openSocket();
+        }, delayMs);
+      } else {
+        this.setRetryBanner(false);
+        this.setStatus(STATUS_ERROR, `Connection failed after ${String(MAX_RETRIES)} retries (${String(e.code)}).`);
+      }
     });
     ws.addEventListener('error', () => {
-      this.setStatus(STATUS_ERROR, 'WebSocket error.');
+      this.devLog('ws error');
     });
     ws.addEventListener('message', (ev) => {
       const data = typeof ev.data === 'string' ? ev.data : '';
@@ -266,6 +361,8 @@ class JarvisClient {
     if (this.ws === null || this.ws.readyState !== WebSocket.OPEN) return;
     this.ws.send(JSON.stringify(evt));
   }
+
+  // ----- Server event handling ---------------------------------------
 
   private handleServerEvent(evt: ServerEvent): void {
     switch (evt.type) {
@@ -320,7 +417,6 @@ class JarvisClient {
         return;
       }
       default:
-        // Most other events are not user-visible; log to dev pane only.
         this.devLog(evt.type);
     }
   }
@@ -337,7 +433,6 @@ class JarvisClient {
   private enqueuePcm(base64: string): void {
     if (this.playerWorklet === null) return;
     const bytes = base64ToUint8(base64);
-    // PCM16 little-endian; convert to Float32 in [-1, 1).
     const samples = new Int16Array(bytes.buffer, bytes.byteOffset, Math.floor(bytes.byteLength / 2));
     const f32 = new Float32Array(samples.length);
     for (let i = 0; i < samples.length; i++) {
@@ -346,6 +441,8 @@ class JarvisClient {
     }
     this.playerWorklet.port.postMessage({ type: 'chunk', samples: f32 }, [f32.buffer]);
   }
+
+  // ----- Visualizer ---------------------------------------------------
 
   private tickBars(): void {
     const tick = (): void => {
@@ -361,7 +458,6 @@ class JarvisClient {
           if (el !== undefined) { el.style.height = `${String(h)}px`; el.style.opacity = String(Math.max(0.4, avg / 255)); }
         }
       } else {
-        // idle wobble
         for (let i = 0; i < NUM_BARS; i++) {
           const el = this.barEls[i];
           if (el !== undefined) {
@@ -375,6 +471,67 @@ class JarvisClient {
       requestAnimationFrame(tick);
     };
     requestAnimationFrame(tick);
+  }
+
+  // ----- Demo manifest harness (Slice 9) -----------------------------
+
+  private setupDemoGlobals(): void {
+    window.__demoReady = true;
+    window.__startDemo = async (manifestUrlOrObject) => {
+      await this.runDemo(manifestUrlOrObject);
+    };
+  }
+
+  /**
+   * If the URL carries `?demo=<manifest>`, fetch and auto-run it. The
+   * `manifest` value is either a URL (absolute or relative) to a JSON
+   * file matching the DemoManifest shape, or one of the bundled names
+   * (just the URL string is used directly).
+   */
+  private maybeAutoStartDemo(): void {
+    const params = new URLSearchParams(window.location.search);
+    const manifest = params.get('demo');
+    if (manifest === null || manifest.length === 0) return;
+    // Run on the next macrotask so the page can finish loading.
+    window.setTimeout(() => {
+      void this.runDemo(manifest);
+    }, 100);
+  }
+
+  private async runDemo(manifestUrlOrObject: string | DemoManifest): Promise<void> {
+    let manifest: DemoManifest;
+    if (typeof manifestUrlOrObject === 'string') {
+      const res = await fetch(manifestUrlOrObject);
+      if (!res.ok) {
+        this.setStatus(STATUS_ERROR, `Demo manifest fetch failed: ${String(res.status)}`);
+        return;
+      }
+      manifest = await res.json() as DemoManifest;
+    } else {
+      manifest = manifestUrlOrObject;
+    }
+    this.devLog(`demo: ${manifest.name} (${String(manifest.steps.length)} steps)`);
+    await this.start();
+    for (const step of manifest.steps) {
+      if (step.delayMs !== undefined && step.delayMs > 0) {
+        await new Promise<void>((r) => window.setTimeout(r, step.delayMs));
+      }
+      if (step.text !== undefined && step.text.length > 0) {
+        // Push the prompt as a text message upstream so the model speaks
+        // a response without needing a real microphone capture.
+        this.sendUpstream({
+          type: 'conversation.item.create',
+          item: {
+            type: 'message',
+            role: 'user',
+            content: [{ type: 'input_text', text: step.text }],
+          },
+        });
+        this.sendUpstream({ type: 'response.create' });
+        const cap = document.getElementById('caption');
+        if (cap !== null) cap.textContent = `[demo] ${step.text}`;
+      }
+    }
   }
 }
 

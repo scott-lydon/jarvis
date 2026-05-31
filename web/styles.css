@@ -197,3 +197,99 @@ html, body {
   font-size: 11px;
   padding-bottom: env(safe-area-inset-bottom);
 }
+
+/* --- Mic permission denied modal (Slice 9) -------------------------------
+   Defaults match the global overlay scroll-overflow rule from CLAUDE.md:
+   bounded max-height, scrollable content, sticky header so the close X
+   is always reachable. */
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.7);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  z-index: 50;
+}
+.modal-backdrop[data-open="true"] { display: flex; }
+
+.modal {
+  background: var(--bg-elev);
+  border: 1px solid var(--line);
+  border-radius: var(--r-2);
+  max-width: 480px;
+  width: 100%;
+  max-height: min(90vh, calc(100vh - 3rem));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  box-shadow: var(--shadow);
+}
+
+.modal-header {
+  position: sticky;
+  top: 0;
+  background: var(--bg-elev);
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  z-index: 1;
+}
+.modal-header h2 {
+  margin: 0;
+  font-size: 16px;
+  letter-spacing: 0.04em;
+}
+.modal-close {
+  background: transparent;
+  border: 1px solid var(--line);
+  color: var(--fg);
+  font-size: 16px;
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  cursor: pointer;
+  line-height: 1;
+}
+.modal-close:hover { border-color: var(--accent); }
+
+.modal-body {
+  padding: 16px 20px 20px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--fg);
+}
+.modal-body p { margin: 0 0 12px; }
+.modal-body ol {
+  margin: 4px 0 12px;
+  padding-left: 20px;
+  color: var(--fg-dim);
+}
+.modal-body code {
+  background: var(--bg);
+  border: 1px solid var(--line);
+  padding: 1px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+/* Retry banner (Slice 9) ------------------------------------------------ */
+.retry-banner {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-elev);
+  border: 1px solid var(--accent-dim);
+  color: var(--fg);
+  padding: 10px 16px;
+  border-radius: 999px;
+  font-size: 13px;
+  display: none;
+  z-index: 40;
+  box-shadow: var(--shadow);
+}
+.retry-banner[data-open="true"] { display: block; }
