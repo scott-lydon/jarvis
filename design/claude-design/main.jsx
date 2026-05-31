@@ -133,14 +133,23 @@ function App() {
     setBanners(b => b.filter(x => x.id !== id));
   }, []);
 
-  // Seed a demo error banner once so the pattern is visible
+  // Seed the mic-permission banner once so the pattern is visible.
+  // Post-UX-review (2026-05-31): banner now ships with `dismissible: false`
+  // and an inline CTA pill so a first-time user can grant access in one tap
+  // without needing to find the mic button at the bottom of the screen.
+  // The X was misleading — implied the warning was optional. It isn't.
   useEffect(() => {
     setBanners([{
       id: 'b1', kind: 'warn',
       title: 'Microphone permission required',
-      body: 'Tap the mic to grant access. Jarvis can\'t hear you until then.',
+      body: 'Jarvis can\'t hear you until you grant access.',
+      dismissible: false,
+      cta: {
+        label: 'Grant microphone access',
+        onClick: () => handleMicTap(),
+      },
     }]);
-  }, []);
+  }, [handleMicTap]);
 
   const turnsCount = useMemo(
     () => items.filter(i => i.kind === 'turn').length,
@@ -166,9 +175,11 @@ function App() {
           <ExamplePrompts/>
         )}
 
-        {/* Render items */}
+        {/* Render items. ToolTile gets `dev={showForce}` so the raw-JSON
+            result is collapsed by default for end users (spoken answer
+            leads) but open by default in dev mode for observability. */}
         {items.map(it => {
-          if (it.kind === 'tool') return <ToolTile key={it.id} tool={it}/>;
+          if (it.kind === 'tool') return <ToolTile key={it.id} tool={it} dev={showForce}/>;
           if (it.kind === 'live-transcript') {
             return (
               <div key={it.id} style={{ padding: '6px 14px' }}>

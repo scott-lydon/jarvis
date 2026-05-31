@@ -49,15 +49,19 @@ const Icon = {
 // STATE LABELS
 // ─────────────────────────────────────────────────────────────
 const STATE_META = {
-  idle:        { label: 'Idle',        hint: 'Tap mic to start',          dotClass: '',     color: 'var(--fg-muted)' },
-  listening:   { label: 'Listening',   hint: 'Speak now',                 dotClass: 'live', color: 'var(--accent)'   },
-  thinking:    { label: 'Thinking',    hint: 'Routing…',                  dotClass: 'warn', color: 'var(--warn)'     },
-  speaking:    { label: 'Speaking',    hint: 'Jarvis is responding',      dotClass: 'live', color: 'var(--accent)'   },
+  // Listening and speaking previously shared the green accent + accent-soft
+  // glow, which made them visually identical from any distance. Post-UX-review
+  // (2026-05-31) speaking is now cyan so the user can tell at a glance whether
+  // it's their turn to talk or Jarvis's. See styles.css --state-* tokens.
+  // Glyph class is a redundant non-color signal (WCAG 1.4.1 Use-of-Color).
+  idle:        { label: 'Idle',        hint: 'Tap mic to start',     dotClass: '',     glyph: 'idle',        color: 'var(--fg-muted)'         },
+  listening:   { label: 'Listening',   hint: 'Speak now',            dotClass: 'live', glyph: 'listening',   color: 'var(--state-listening)'  },
+  thinking:    { label: 'Thinking',    hint: 'Routing…',             dotClass: 'warn', glyph: 'thinking',    color: 'var(--state-thinking)'   },
+  speaking:    { label: 'Speaking',    hint: 'Jarvis is responding', dotClass: 'speak',glyph: 'speaking',    color: 'var(--state-speaking)'   },
   // Transient state shown for ~400ms after a barge-in cancel (US-04).
-  // Visual proof to the tester that the cancel fired and the in-flight
-  // response was stopped. Auto-reverts to 'listening' (the user is the
-  // one who interrupted, so we should hear them next).
-  interrupted: { label: 'Interrupted', hint: 'Stopping…',                 dotClass: 'err',  color: 'var(--err)'      },
+  // Auto-reverts to 'listening' (the user is the one who interrupted,
+  // so we should hear them next). Visual + X-glyph for trauma-fast read.
+  interrupted: { label: 'Interrupted', hint: 'Stopping…',            dotClass: 'err',  glyph: 'interrupted', color: 'var(--state-interrupted)' },
 };
 
 // ─────────────────────────────────────────────────────────────
@@ -81,7 +85,14 @@ function Header({ state, sessionId, dev }) {
         }}>
           <div style={{ width: 6, height: 6, borderRadius: 50, background: 'var(--accent)' }}/>
         </div>
-        <div style={{ fontWeight: 600, letterSpacing: '-0.01em', fontSize: 15 }}>Jarvis</div>
+        {/* Wordmark + tagline. Tagline added post-UX-review so a first-time user
+            gets a one-line "what is this" within 2 seconds of opening the app. */}
+        <div style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.1 }}>
+          <div style={{ fontWeight: 600, letterSpacing: '-0.01em', fontSize: 15 }}>Jarvis</div>
+          <div style={{ fontSize: 10.5, color: 'var(--fg-dim)', marginTop: 1 }}>
+            Voice copilot for field work
+          </div>
+        </div>
         {dev && (
           <span className="mono" style={{
             fontSize: 9.5, padding: '2px 6px', borderRadius: 4,
@@ -92,16 +103,28 @@ function Header({ state, sessionId, dev }) {
         )}
       </div>
 
-      <div style={{
-        display: 'flex', alignItems: 'center', gap: 7,
-        padding: '5px 10px 5px 8px',
-        background: 'var(--surface-1)',
-        border: '1px solid var(--border)',
-        borderRadius: 999,
-        fontSize: 12,
-      }}>
-        <span className={`dot ${meta.dotClass}`}/>
+      {/* Status badge with state-glyph (redundant non-color signal). */}
+      <div
+        role="status"
+        aria-label={`Jarvis is ${meta.label}. ${meta.hint}`}
+        style={{
+          display: 'flex', alignItems: 'center', gap: 7,
+          padding: '5px 10px 5px 8px',
+          background: 'var(--surface-1)',
+          border: '1px solid var(--border)',
+          borderRadius: 999,
+          fontSize: 12,
+        }}
+      >
+        <span className={`state-glyph ${meta.glyph}`} aria-hidden="true"/>
         <span style={{ color: meta.color, fontWeight: 500 }}>{meta.label}</span>
+      </div>
+
+      {/* Screen-reader-only live region. Announces every state transition so
+          a VoiceOver user knows whether Jarvis is hearing them, working,
+          speaking, or has been interrupted. WCAG 4.1.3. */}
+      <div className="sr-only" role="status" aria-live="polite" aria-atomic="true">
+        Jarvis is {meta.label.toLowerCase()}. {meta.hint}
       </div>
     </div>
   );
@@ -110,12 +133,17 @@ function Header({ state, sessionId, dev }) {
 // ─────────────────────────────────────────────────────────────
 // ERROR BANNER — pinned at top of log, dismissible
 // ─────────────────────────────────────────────────────────────
+// Banners now support an optional `cta` (action-bearing pill) and a
+// `dismissible: false` flag. Mandatory-action banners (mic permission)
+// drop the dismiss X — a first-time user shouldn't be able to ignore a
+// blocker disguised as advice. Per UX review 2026-05-31.
 function ErrorBanner({ banner, onDismiss }) {
   const palette = {
     err:  { bg: 'rgba(248,113,113,0.08)',  border: 'rgba(248,113,113,0.32)',  fg: '#fca5a5' },
     warn: { bg: 'rgba(251,191,36,0.08)',   border: 'rgba(251,191,36,0.32)',   fg: '#fcd34d' },
     info: { bg: 'rgba(96,165,250,0.08)',   border: 'rgba(96,165,250,0.32)',   fg: '#93c5fd' },
   }[banner.kind || 'err'];
+  const showDismiss = banner.dismissible !== false;
   return (
     <div className="fade-in" style={{
       display: 'flex', alignItems: 'flex-start', gap: 8,
@@ -127,10 +155,34 @@ function ErrorBanner({ banner, onDismiss }) {
       <div style={{ flex: 1, lineHeight: 1.4 }}>
         <div style={{ fontWeight: 600 }}>{banner.title}</div>
         {banner.body && <div style={{ opacity: 0.85, marginTop: 2 }}>{banner.body}</div>}
+        {banner.cta && (
+          <button
+            onClick={banner.cta.onClick}
+            style={{
+              marginTop: 8,
+              padding: '6px 12px',
+              borderRadius: 999,
+              fontSize: 12,
+              fontWeight: 600,
+              color: '#0a0a0a',
+              background: palette.fg,
+              border: `1px solid ${palette.fg}`,
+              cursor: 'pointer',
+            }}
+          >
+            {banner.cta.label}
+          </button>
+        )}
       </div>
-      <button onClick={() => onDismiss(banner.id)} style={{ color: palette.fg, opacity: 0.7, padding: 2 }} aria-label="Dismiss">
-        <Icon.close/>
-      </button>
+      {showDismiss && (
+        <button
+          onClick={() => onDismiss(banner.id)}
+          style={{ color: palette.fg, opacity: 0.7, padding: 2 }}
+          aria-label="Dismiss"
+        >
+          <Icon.close/>
+        </button>
+      )}
     </div>
   );
 }
@@ -140,9 +192,20 @@ function ErrorBanner({ banner, onDismiss }) {
 // ─────────────────────────────────────────────────────────────
 function TurnRow({ turn, density, streaming }) {
   const isUser = turn.role === 'user';
+  const isRefusal = turn.refused === true; // US-06 grounded refusal variant
   const pad = density === 'tight' ? '6px 14px' : density === 'medium' ? '10px 14px' : '14px 14px';
   return (
-    <div className="fade-in" style={{ padding: pad }}>
+    <div
+      className="fade-in"
+      style={{
+        padding: pad,
+        // Refusal variant: left-edge neutral-info accent stripe so the user
+        // can see at a glance "this was refused on purpose, not fabricated".
+        // Trust signal that matches the spec.md US-06 acceptance criteria.
+        borderLeft: isRefusal ? '3px solid var(--info)' : '3px solid transparent',
+        marginLeft:  isRefusal ? -3 : 0,
+      }}
+    >
       <div style={{
         display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 3,
         justifyContent: isUser ? 'flex-end' : 'flex-start',
@@ -155,16 +218,26 @@ function TurnRow({ turn, density, streaming }) {
         }}>
           {isUser ? 'USER' : 'JARVIS'}
         </span>
+        {isRefusal && (
+          <span className="mono" style={{
+            fontSize: 9.5, padding: '2px 6px', borderRadius: 4,
+            background: 'rgba(96,165,250,0.12)',
+            color: 'var(--info)',
+            border: '1px solid rgba(96,165,250,0.32)',
+            textTransform: 'uppercase', letterSpacing: '0.06em',
+          }}>no tool for this</span>
+        )}
         <span className="mono tnum" style={{ fontSize: 10, color: 'var(--fg-faint)', order: 1 }}>
           {turn.time}
         </span>
       </div>
       <div style={{
-        color: 'var(--fg)',
+        color: isRefusal ? 'var(--fg-dim)' : 'var(--fg)',
         fontSize: 14.5, lineHeight: 1.42,
         textWrap: 'pretty',
         whiteSpace: 'pre-wrap',
         textAlign: isUser ? 'right' : 'left',
+        fontStyle: isRefusal ? 'italic' : 'normal',
       }}>
         {turn.text}
         {streaming && (
@@ -208,19 +281,37 @@ function JsonBlock({ value }) {
   );
 }
 
-function ToolTile({ tool }) {
-  const [openArgs, setOpenArgs] = useState(false);
-  const [openResult, setOpenResult] = useState(true);
-  const meta = TOOL_META[tool.name] || { icon: '◌', label: tool.name };
+// ToolTile gained two post-UX-review affordances:
+// (1) `pending` state — rendered while the tool call is in flight, BEFORE
+//     the duration or result lands. Makes US-02 cadence visible: the user
+//     sees "Jarvis is reaching for the data" instead of unexplained silence.
+// (2) `dev` prop — when false, the raw JSON result is collapsed by default
+//     so a non-developer user gets the spoken answer as the primary signal,
+//     not a pretty-printed JSON dump competing for attention.
+function ToolTile({ tool, dev = false }) {
+  const isPending = tool.pending === true || tool.duration == null;
   const hasError = !!tool.error;
+  // Non-dev users: collapse result by default so the spoken answer leads.
+  // Dev/pending: open by default for transparency / observability.
+  const [openArgs, setOpenArgs] = useState(false);
+  const [openResult, setOpenResult] = useState(dev || isPending);
+  const meta = TOOL_META[tool.name] || { icon: '◌', label: tool.name };
+
+  // Pending tiles get a shimmering border accent (the .fade-in animation is
+  // suppressed under prefers-reduced-motion; a static accent border remains).
+  const borderColor = isPending ? 'var(--accent-ring)'
+                    : hasError  ? 'rgba(248,113,113,0.45)'
+                                : 'var(--border)';
 
   return (
     <div className="fade-in" style={{
       margin: '6px 14px',
-      border: '1px solid var(--border)',
+      border: `1px solid ${borderColor}`,
       borderRadius: 8,
       background: 'var(--surface-1)',
       overflow: 'hidden',
+      boxShadow: isPending ? '0 0 0 3px var(--accent-soft)' : 'none',
+      transition: 'box-shadow 200ms, border-color 200ms',
     }}>
       {/* header */}
       <div style={{
@@ -229,39 +320,72 @@ function ToolTile({ tool }) {
         borderBottom: '1px solid var(--hairline)',
         background: 'linear-gradient(180deg, rgba(255,255,255,0.02), transparent)',
       }}>
-        <span style={{ color: hasError ? 'var(--err)' : 'var(--accent)', fontSize: 13 }}>{meta.icon}</span>
+        <span style={{
+          color: hasError  ? 'var(--err)'
+               : isPending ? 'var(--accent)'
+                           : 'var(--accent)',
+          fontSize: 13,
+        }}>
+          {meta.icon}
+        </span>
         <span className="mono" style={{ fontSize: 12, color: 'var(--fg)', fontWeight: 600 }}>
           {meta.label}
+          {isPending && (
+            <span style={{
+              marginLeft: 4, color: 'var(--accent)',
+              display: 'inline-flex', alignItems: 'center', gap: 3,
+            }}>
+              <ThinkingDots/>
+            </span>
+          )}
         </span>
-        <span className="mono" style={{ fontSize: 10, color: 'var(--fg-faint)' }}>
-          {tool.duration}ms
-        </span>
+        {!isPending && (
+          <span className="mono" style={{ fontSize: 10, color: 'var(--fg-dim)' }}>
+            {tool.duration}ms
+          </span>
+        )}
         <div style={{ flex: 1 }}/>
         <span className="mono" style={{
           fontSize: 9.5, padding: '2px 6px', borderRadius: 4,
-          background: hasError ? 'rgba(248,113,113,0.12)' : 'var(--surface-2)',
-          color: hasError ? 'var(--err)' : 'var(--fg-muted)',
-          border: `1px solid ${hasError ? 'rgba(248,113,113,0.3)' : 'var(--border)'}`,
+          background: hasError
+            ? 'rgba(248,113,113,0.12)'
+            : isPending
+              ? 'var(--accent-soft)'
+              : 'var(--surface-2)',
+          color: hasError
+            ? 'var(--err)'
+            : isPending
+              ? 'var(--accent)'
+              : 'var(--fg-muted)',
+          border: `1px solid ${
+            hasError  ? 'rgba(248,113,113,0.3)'
+          : isPending ? 'var(--accent-ring)'
+                      : 'var(--border)'
+          }`,
           textTransform: 'uppercase', letterSpacing: '0.06em', whiteSpace: 'nowrap',
         }}>
-          {hasError ? 'error' : 'tool call'}
+          {hasError ? 'error' : isPending ? 'pending' : 'tool call'}
         </span>
       </div>
 
       {/* args (collapsed by default) */}
-      <CollapseRow label="args" open={openArgs} onToggle={() => setOpenArgs(v => !v)}>
-        <JsonBlock value={tool.args}/>
-      </CollapseRow>
+      {!isPending && (
+        <CollapseRow label="args" open={openArgs} onToggle={() => setOpenArgs(v => !v)}>
+          <JsonBlock value={tool.args}/>
+        </CollapseRow>
+      )}
 
       {/* result / error */}
-      <CollapseRow
-        label={hasError ? 'error' : 'result'}
-        open={openResult}
-        onToggle={() => setOpenResult(v => !v)}
-        labelColor={hasError ? 'var(--err)' : undefined}
-      >
-        <JsonBlock value={hasError ? tool.error : tool.result}/>
-      </CollapseRow>
+      {!isPending && (
+        <CollapseRow
+          label={hasError ? 'error' : 'result'}
+          open={openResult}
+          onToggle={() => setOpenResult(v => !v)}
+          labelColor={hasError ? 'var(--err)' : undefined}
+        >
+          <JsonBlock value={hasError ? tool.error : tool.result}/>
+        </CollapseRow>
+      )}
     </div>
   );
 }
@@ -290,10 +414,16 @@ function CollapseRow({ label, open, onToggle, labelColor, children }) {
 // ─────────────────────────────────────────────────────────────
 // IDLE EMPTY STATE — example prompts
 // ─────────────────────────────────────────────────────────────
+// `chip` is the human-facing label shown to the end user. `tool` is the
+// internal tool name used by the dispatcher. They diverge for memory_write
+// because the raw tool name reads as engineer-speak ("write to memory"),
+// while users intuit "memory" as a capability category. github stays as
+// github since the target audience (technical-adjacent field workers) knows
+// the term and the spec uses real public repos as the demo.
 const EXAMPLE_PROMPTS = [
-  { tool: 'github',       text: 'How many open PRs on this repo?' },
-  { tool: 'weather',      text: 'Weather in Austin' },
-  { tool: 'memory_write', text: 'Yesterday I asked about deployment, what did we figure out?' },
+  { tool: 'github',       chip: 'github',  text: 'How many open PRs on this repo?' },
+  { tool: 'weather',      chip: 'weather', text: 'Weather in Austin' },
+  { tool: 'memory_write', chip: 'memory',  text: 'Yesterday I asked about deployment, what did we figure out?' },
 ];
 
 function ExamplePrompts({ onUse }) {
@@ -324,7 +454,7 @@ function ExamplePrompts({ onUse }) {
               padding: '2px 5px', borderRadius: 3,
               background: 'var(--accent-soft)',
               border: '1px solid var(--accent-ring)',
-            }}>{p.tool}</span>
+            }}>{p.chip || p.tool}</span>
             <span style={{ lineHeight: 1.35 }}>"{p.text}"</span>
           </button>
         ))}
@@ -337,68 +467,137 @@ function ExamplePrompts({ onUse }) {
 // MIC BUTTON — animated by state. Bottom-center, 88px.
 // ─────────────────────────────────────────────────────────────
 function MicButton({ state, onTap, micLevels }) {
+  const isIdle      = state === 'idle';
   const isListening = state === 'listening';
   const isThinking  = state === 'thinking';
   const isSpeaking  = state === 'speaking';
+  const isInterrupted = state === 'interrupted';
   const isActive    = isListening || isSpeaking;
 
+  // Speaking now uses the speaking-state cyan so the user can distinguish
+  // "should I talk?" (green ring) from "shut up, Jarvis is talking" (cyan
+  // ring) at a glance. Interrupted uses err-red for the brief barge-in cue.
+  const ringColor = isListening   ? 'var(--state-listening)'
+                  : isSpeaking    ? 'var(--state-speaking)'
+                  : isInterrupted ? 'var(--state-interrupted)'
+                  : 'var(--accent)';
+  const ringGlow  = isListening   ? 'rgba(74,222,128,0.32)'
+                  : isSpeaking    ? 'rgba(34,211,238,0.32)'
+                  : isInterrupted ? 'rgba(248,113,113,0.36)'
+                  : 'var(--accent-soft)';
+
   return (
-    <div style={{
-      position: 'relative',
-      width: 120, height: 120,
-      display: 'grid', placeItems: 'center',
-    }}>
-      {/* Pulsing rings, only while listening */}
+    // The OUTER wrapper is now the hit target. 120×120 (was 88×88 inside a
+    // dead 120×120 wrapper) — gloves, wet hands, and ambient-stress fingers
+    // miss small targets. WCAG 2.5.8 and 2.5.5. role="button" + aria-pressed
+    // give screen readers a real toggle to announce.
+    <div
+      role="button"
+      aria-pressed={isActive}
+      aria-label={isActive ? 'Stop Jarvis' : 'Start listening'}
+      tabIndex={0}
+      onClick={onTap}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onTap?.(); } }}
+      style={{
+        position: 'relative',
+        width: 120, height: 120,
+        display: 'grid', placeItems: 'center',
+        cursor: 'pointer',
+        touchAction: 'manipulation',
+        WebkitTapHighlightColor: 'transparent',
+      }}
+    >
+      {/* Idle: slow breathing pulse so the button looks ALIVE, not disabled.
+          Pre-fix the idle mic looked identical to a broken/disabled button
+          (the orange permission banner above made this worse). The 3s pulse
+          is slower than listening's 1.8s so the two states still differ. */}
+      {isIdle && (
+        <div style={{
+          position: 'absolute', inset: 18,
+          borderRadius: '50%',
+          border: '1.5px solid var(--accent-ring)',
+          animation: 'ring-pulse 3s ease-out infinite',
+          opacity: 0,
+        }}/>
+      )}
+
+      {/* Pulsing rings while listening (faster, full accent). */}
       {isListening && [0, 1].map(i => (
         <div key={i} style={{
           position: 'absolute', inset: 16,
           borderRadius: '50%',
-          border: '2px solid var(--accent)',
+          border: '2px solid var(--state-listening)',
           animation: `ring-pulse 1.8s ease-out ${i * 0.9}s infinite`,
           opacity: 0,
         }}/>
       ))}
 
-      {/* Static ring when speaking — softer */}
+      {/* Static cyan ring while speaking. */}
       {isSpeaking && (
         <div style={{
           position: 'absolute', inset: 18,
           borderRadius: '50%',
-          border: '1.5px solid var(--accent-ring)',
+          border: '1.5px solid var(--state-speaking)',
         }}/>
       )}
 
-      {/* Mic button */}
-      <button
-        onClick={onTap}
-        aria-label={isActive ? 'Stop' : 'Start listening'}
-        style={{
-          position: 'relative',
-          width: 88, height: 88,
+      {/* Static red ring while interrupted (transient, ~400ms). */}
+      {isInterrupted && (
+        <div style={{
+          position: 'absolute', inset: 18,
           borderRadius: '50%',
-          background: isListening
-            ? 'radial-gradient(circle at 50% 35%, #2a3a30, #0f1612)'
-            : 'var(--surface-2)',
-          border: `1.5px solid ${isListening ? 'var(--accent)' : 'var(--border-strong)'}`,
-          boxShadow: isListening
-            ? `0 0 0 5px var(--accent-soft), 0 8px 28px -8px var(--accent-glow)`
-            : isSpeaking
-              ? `0 0 0 4px var(--accent-soft)`
-              : '0 6px 20px -10px rgba(0,0,0,0.7)',
-          color: isListening ? 'var(--accent)' : 'var(--fg-muted)',
-          display: 'grid', placeItems: 'center',
-          transition: 'background 200ms, border-color 200ms, box-shadow 200ms, color 200ms',
-        }}
-      >
+          border: '1.5px solid var(--state-interrupted)',
+        }}/>
+      )}
+
+      {/* Inner visual surface (not the hit target — pointer-events off). */}
+      <div style={{
+        pointerEvents: 'none',
+        position: 'relative',
+        width: 88, height: 88,
+        borderRadius: '50%',
+        background: isListening
+          ? 'radial-gradient(circle at 50% 35%, #2a3a30, #0f1612)'
+          : 'var(--surface-2)',
+        border: `1.5px solid ${
+          isListening   ? 'var(--state-listening)'
+        : isSpeaking    ? 'var(--state-speaking)'
+        : isInterrupted ? 'var(--state-interrupted)'
+        : isIdle        ? 'var(--accent-ring)'
+                        : 'var(--border-strong)'
+        }`,
+        boxShadow: isListening
+          ? `0 0 0 5px var(--accent-soft), 0 8px 28px -8px var(--accent-glow)`
+          : isSpeaking
+            ? `0 0 0 4px ${ringGlow}`
+          : isInterrupted
+            ? `0 0 0 4px ${ringGlow}`
+          : isIdle
+            ? `0 0 0 3px var(--accent-soft), 0 6px 20px -10px rgba(0,0,0,0.7)`
+            : '0 6px 20px -10px rgba(0,0,0,0.7)',
+        // Idle now shows accent-colored mic so the button doesn't read as
+        // disabled. Pre-fix the muted-grey icon + grey surface combined with
+        // the orange permission banner above signaled "this is broken".
+        color: (isListening || isIdle) ? 'var(--accent)'
+             : isSpeaking              ? 'var(--state-speaking)'
+             : isInterrupted           ? 'var(--state-interrupted)'
+             : 'var(--fg-muted)',
+        display: 'grid', placeItems: 'center',
+        transition: 'background 200ms, border-color 200ms, box-shadow 200ms, color 200ms',
+      }}>
         {isThinking && <ThinkingDots/>}
         {isSpeaking && <WaveformBars/>}
-        {(state === 'idle' || isListening) && (
+        {isInterrupted && (
+          /* X glyph for the transient interrupted state. */
+          <div style={{ fontSize: 26, fontWeight: 300, color: 'var(--state-interrupted)' }}>×</div>
+        )}
+        {(isIdle || isListening) && (
           <div style={{ display: 'grid', placeItems: 'center', gap: 6 }}>
             <Icon.mic/>
             {isListening && <LevelMeter levels={micLevels}/>}
           </div>
         )}
-      </button>
+      </div>
     </div>
   );
 }
@@ -496,7 +695,35 @@ function ForceStateBar({ state, onSet }) {
 // ─────────────────────────────────────────────────────────────
 // FOOTER — debug link + session reset
 // ─────────────────────────────────────────────────────────────
+// Footer is now dev-mode-gated. Pre-fix it showed "Debug panel" link,
+// "8 turns" counter, and "Reset session" to every user — confusing for
+// first-time users (8 of what? I just opened it). In production view the
+// footer collapses to a single muted "Reset" so a stuck user can recover.
+// Dev mode (?dev=1 or #dev) restores the full debug surface.
 function Footer({ onReset, turns, showForce, onToggleForce }) {
+  if (!showForce) {
+    return (
+      <div style={{
+        display: 'flex', alignItems: 'center', justifyContent: 'flex-end',
+        padding: '8px 16px 38px',
+        borderTop: '1px solid var(--border)',
+        background: 'var(--bg)',
+        fontSize: 11.5,
+      }}>
+        <button
+          onClick={onReset}
+          aria-label="Reset session"
+          style={{
+            color: 'var(--fg-dim)',
+            display: 'inline-flex', alignItems: 'center', gap: 5,
+          }}
+        >
+          <Icon.reset/>
+          Reset
+        </button>
+      </div>
+    );
+  }
   return (
     <div style={{
       display: 'flex', alignItems: 'center', justifyContent: 'space-between',
@@ -520,11 +747,11 @@ function Footer({ onReset, turns, showForce, onToggleForce }) {
         display: 'inline-flex', alignItems: 'center', gap: 5,
         padding: '4px 9px', borderRadius: 999,
         fontSize: 11, fontFamily: 'var(--f-mono)', letterSpacing: '0.02em',
-        color: showForce ? 'var(--warn)' : 'var(--fg-muted)',
-        background: showForce ? 'rgba(251,191,36,0.1)' : 'var(--surface-1)',
-        border: `1px solid ${showForce ? 'rgba(251,191,36,0.32)' : 'var(--border)'}`,
+        color: 'var(--warn)',
+        background: 'rgba(251,191,36,0.1)',
+        border: '1px solid rgba(251,191,36,0.32)',
       }}>
-        <span style={{ fontSize: 11, lineHeight: 1 }}>{showForce ? '●' : '○'}</span>
+        <span style={{ fontSize: 11, lineHeight: 1 }}>●</span>
         Dev mode
       </button>
       <button onClick={onReset} style={{
