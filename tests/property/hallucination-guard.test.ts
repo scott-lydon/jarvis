@@ -121,4 +121,16 @@ describe('US-06 hallucination guard — prompt-level property', () => {
   it('the barge-in reminder is in the prompt (US-04 paired)', () => {
     expect(promptWithSomeToolsAndUser()).toMatch(/stop immediately and listen/i);
   });
+
+  it('the unclear-transcript guard is in the prompt (Bug-2 fix, 2026-05-31)', () => {
+    // Real production failure: Whisper transcribes silence/noise to the
+    // single token "you", and without this directive the model would
+    // route that as a confident weather lookup. The directive forces the
+    // model to ASK FOR REPETITION instead of calling a tool.
+    const p = promptWithSomeToolsAndUser();
+    expect(p).toMatch(/single short token/i);
+    expect(p).toMatch(/"you"/i);
+    expect(p).toMatch(/repeat/i);
+    expect(p).toMatch(/Do not call a tool on an unclear transcript/i);
+  });
 });

@@ -2,16 +2,56 @@
 // if needed, converts to 16-bit PCM, posts back as ArrayBuffer in
 // ~50 ms chunks. Also computes RMS so the main thread can detect the
 // user starting to speak while the agent is speaking (barge-in).
+//
+// Bug-1 visibility fix (2026-05-31): emit a periodic {kind:'diag'}
+// message containing the captured chunk count, average abs, max abs,
+// and the AudioContext sample rate. Lets the browser console (and the
+// integration test) confirm REAL audio is flowing — silent input
+// produces all-zero diagnostics, distinguishable from a working mic.
 
 class PcmRecorderProcessor extends AudioWorkletProcessor {
   constructor(options) {
     super();
     const opts = (options && options.processorOptions) || {};
     this.targetRate = opts.targetRate || 24000;
+    // Set explicitly so the main thread can sanity-check it.
     this.srcRate = sampleRate;
+    this.diagIntervalMs = opts.diagIntervalMs || 2000;
     this.buf = [];
     this.bufSamples = 0;
     this.chunkSamples = Math.floor(this.targetRate * 0.05); // 50ms
+    // Diagnostic accumulators (reset every diagIntervalMs).
+    this.diagChunks = 0;
+    this.diagSumAbs = 0;
+    this.diagMaxAbs = 0;
+    this.diagSampleCount = 0;
+    this.diagStartedAt = currentTime * 1000; // ms
+    // Post the first diag eagerly so the main thread sees that audio
+    // is flowing within the first chunk window. Without this, the
+    // first 2s of a session look indistinguishable from silence.
+    this._postedFirstDiag = false;
+  }
+
+  _maybePostDiag() {
+    const nowMs = currentTime * 1000;
+    if (this._postedFirstDiag && (nowMs - this.diagStartedAt) < this.diagIntervalMs) return;
+    const mean = this.diagSampleCount > 0 ? this.diagSumAbs / this.diagSampleCount : 0;
+    this.port.postMessage({
+      kind: 'diag',
+      srcRate: this.srcRate,
+      targetRate: this.targetRate,
+      chunks: this.diagChunks,
+      samples: this.diagSampleCount,
+      meanAbs: mean,
+      maxAbs: this.diagMaxAbs,
+      elapsedMs: nowMs - this.diagStartedAt,
+    });
+    this.diagChunks = 0;
+    this.diagSumAbs = 0;
+    this.diagMaxAbs = 0;
+    this.diagSampleCount = 0;
+    this.diagStartedAt = nowMs;
+    this._postedFirstDiag = true;
   }
 
   process(inputs) {
@@ -63,19 +103,34 @@ class PcmRecorderProcessor extends AudioWorkletProcessor {
       }
       this.bufSamples -= this.chunkSamples;
 
-      // Float32 → Int16 LE
+      // Float32 → Int16 LE + RMS + diagnostics
       const pcm = new Int16Array(out.length);
       let sumSq = 0;
+      let chunkSumAbs = 0;
+      let chunkMaxAbs = 0;
       for (let i = 0; i < out.length; i++) {
         let s = out[i];
         if (s > 1) s = 1; else if (s < -1) s = -1;
         const v = Math.round(s * 32767);
         pcm[i] = v;
+        const abs = Math.abs(s);
         sumSq += s * s;
+        chunkSumAbs += abs;
+        if (abs > chunkMaxAbs) chunkMaxAbs = abs;
       }
       const rms = Math.sqrt(sumSq / out.length);
+
+      // Update diagnostic accumulators BEFORE posting the chunk so a
+      // late-arriving listener still sees the data.
+      this.diagChunks += 1;
+      this.diagSumAbs += chunkSumAbs;
+      this.diagSampleCount += out.length;
+      if (chunkMaxAbs > this.diagMaxAbs) this.diagMaxAbs = chunkMaxAbs;
+
       this.port.postMessage({ pcm: pcm.buffer, rms }, [pcm.buffer]);
     }
+
+    this._maybePostDiag();
     return true;
   }
 }

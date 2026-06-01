@@ -34,6 +34,13 @@ const LANGUAGE_LINE =
 const HALLUCINATION_GUARD = [
   'If a factual claim cannot be grounded in a tool response, in this prompt, or in the user memory below, say "I don\'t know" or "I don\'t have reliable information on that." Do not guess numbers, names, repository details, weather values, dates, or commit hashes.',
   'When a tool errors, surface the error honestly ("I tried to reach GitHub but it timed out.") rather than fabricating.',
+  // Bug-2 fix (2026-05-31): if the transcript is short, unclear, or
+  // appears off-topic from prior conversation, ASK THE USER TO REPEAT
+  // instead of inventing a tool call. The voice transcription pipeline
+  // (Whisper) frequently falls back to single tokens like "you" on
+  // silenced input; without this guard the model would route those
+  // single-token transcripts into a confident weather lookup.
+  'If the user\'s transcribed message is a single short token (such as "you", "the", "uh") or otherwise unclear with no context, say "Sorry, I didn\'t catch that — could you repeat?" Do not call a tool on an unclear transcript.',
 ].join(' ');
 
 const SLOW_TOOL_LINE =

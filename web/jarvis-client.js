@@ -30,11 +30,17 @@
   const TARGET_RATE      = 24000;
   const MAX_RETRIES      = 3;
   const RETRY_BACKOFF_MS = 1000;
-  // RMS threshold above which we treat captured mic audio as "user is
-  // actively speaking right now" while we're playing back. Tuned in the
-  // Slice-6 barge-in test; the player worklet posts back smoothed RMS so
-  // this is robust to brief room noise.
-  const BARGE_IN_RMS_THRESHOLD = 0.04;
+  // Barge-in detection. We watch TWO signals so a single noisy false
+  // positive doesn't trip the playback teardown — and so a single silenced
+  // mic chunk doesn't HIDE a real barge-in either.
+  //   - worklet RMS (post-resample, post-quantize): trips at 0.02
+  //   - mic AnalyserNode RMS (raw mic source, no quantization): trips at 0.05
+  // We tear down on whichever fires first.
+  const BARGE_IN_WORKLET_RMS_THRESHOLD = 0.02;
+  const BARGE_IN_ANALYSER_RMS_THRESHOLD = 0.05;
+  // Diagnostic: the worklet posts a one-line summary every N seconds so we
+  // can see in the browser console whether real audio is reaching us.
+  const MIC_DIAG_INTERVAL_MS = 2000;
 
   function arrayBufferToBase64(buf) {
     const bytes = new Uint8Array(buf);
@@ -66,11 +72,25 @@
       this.ws = null;
       this.micCtx = null;
       this.micStream = null;
+      this.micSource = null;
       this.micWorklet = null;
+      // Mic-side analyser — drives the LevelMeter while the user is
+      // listening. Separate from the playback analyser below.
+      this.micAnalyser = null;
+      this.micAnalyserBuf = new Uint8Array(0);
+      this.micTimeBuf = new Float32Array(0);
       this.playerCtx = null;
       this.playerWorklet = null;
+      // Playback-side analyser — drives the LevelMeter while Jarvis is
+      // speaking. Reading from the mic during playback is wrong because
+      // the user isn't speaking; reading from playback while listening is
+      // wrong because there's nothing playing. _tickLevels() picks the
+      // right source based on this.status.
       this.analyser = null;
       this.analyserBuf = new Uint8Array(0);
+      // Last mic-diagnostic post timestamp (ms). The worklet posts one
+      // sampled summary per chunk; we log once per MIC_DIAG_INTERVAL_MS.
+      this._lastDiagMs = 0;
 
       this.status = STATUS_IDLE;
       this.active = false;
@@ -147,6 +167,8 @@
         this.ws = null;
       }
       if (this.micWorklet) { try { this.micWorklet.disconnect(); } catch (_) {} this.micWorklet = null; }
+      if (this.micAnalyser) { try { this.micAnalyser.disconnect(); } catch (_) {} this.micAnalyser = null; }
+      if (this.micSource) { try { this.micSource.disconnect(); } catch (_) {} this.micSource = null; }
       if (this.micStream) {
         const tracks = this.micStream.getTracks();
         for (let i = 0; i < tracks.length; i++) { try { tracks[i].stop(); } catch (_) {} }
@@ -160,31 +182,94 @@
     // ── Audio open / teardown ────────────────────────────────────
     async _openAudio(opts) {
       if (opts && opts.withMic) {
+        // Bug-1 fix (2026-05-31): drop `noiseSuppression: true` and the
+        // `sampleRate` constraint.
+        //
+        // Why: Chrome's noiseSuppression aggressively zero-fills buffers
+        // that don't match its speech profile (room noise, quiet voice,
+        // accented input, anything brief). When that happens upstream
+        // Whisper hears silence and falls back to its most common
+        // single-token output: "you". That is the EXACT symptom the user
+        // saw — every utterance transcribed to "you". `echoCancellation`
+        // stays ON because the playback bleeds into the mic otherwise
+        // and trips fake barge-ins.
+        //
+        // We also let the mic deliver at its native rate (usually 48 kHz)
+        // and let the AudioContext + pcm-recorder worklet handle the
+        // 48→24 kHz downsample with linear interpolation. The previous
+        // `sampleRate: 24000` constraint was silently ignored by every
+        // browser, which produced subtle aliasing on top of the noise-
+        // suppression damage.
         const stream = await navigator.mediaDevices.getUserMedia({
-          audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1, sampleRate: TARGET_RATE },
+          audio: {
+            echoCancellation: true,
+            noiseSuppression: false,
+            autoGainControl: true,
+            channelCount: 1,
+          },
           video: false,
         });
         this.micStream = stream;
-        this.micCtx = new AudioContext({ sampleRate: TARGET_RATE, latencyHint: 'interactive' });
+        // No forced sampleRate — the AudioContext defaults to the device
+        // rate, the worklet sees `sampleRate` and downsamples to 24 kHz.
+        this.micCtx = new AudioContext({ latencyHint: 'interactive' });
         await this.micCtx.audioWorklet.addModule('./pcm-recorder.js');
         const src = this.micCtx.createMediaStreamSource(stream);
+        this.micSource = src;
+
+        // Mic-side analyser for the LevelMeter visualisation while
+        // listening (Bug-4 fix). Hangs off the SAME source node as the
+        // worklet so it sees identical audio.
+        this.micAnalyser = this.micCtx.createAnalyser();
+        this.micAnalyser.fftSize = 256;
+        this.micAnalyser.smoothingTimeConstant = 0.6;
+        this.micAnalyserBuf = new Uint8Array(this.micAnalyser.frequencyBinCount);
+        this.micTimeBuf = new Float32Array(this.micAnalyser.fftSize);
+        src.connect(this.micAnalyser);
+
         this.micWorklet = new AudioWorkletNode(this.micCtx, 'pcm-recorder', {
-          processorOptions: { targetRate: TARGET_RATE },
+          processorOptions: { targetRate: TARGET_RATE, diagIntervalMs: MIC_DIAG_INTERVAL_MS },
         });
         src.connect(this.micWorklet);
         this.micWorklet.port.onmessage = (ev) => {
-          const pcm = ev.data.pcm;
-          const rms = ev.data.rms;
-          // Barge-in: user is speaking while Jarvis is speaking. Trigger
-          // the HARD playback teardown + the upstream cancel.
-          if (this.status === STATUS_SPEAKING && rms > BARGE_IN_RMS_THRESHOLD) {
-            void this._handleBargeIn();
+          const data = ev.data;
+          // Diagnostic message (Bug-1 visibility): the worklet posts
+          // {kind: 'diag', ...} periodically. Surface to the dev panel
+          // via the listener so we can see if real audio is flowing.
+          if (data && data.kind === 'diag') {
+            if (typeof this.listener.onMicDiag === 'function') this.listener.onMicDiag(data);
+            return;
+          }
+          const pcm = data.pcm;
+          const rms = data.rms || 0;
+          // Bug-5 fix: dual-signal barge-in. Trip on either the worklet
+          // RMS OR the analyser-time-domain RMS (raw mic, no quantize),
+          // so a noise-suppressed worklet output doesn't HIDE a real
+          // barge-in. The mic analyser path is checked here too.
+          if (this.status === STATUS_SPEAKING) {
+            const analyserRms = this._readMicAnalyserRMS();
+            if (rms > BARGE_IN_WORKLET_RMS_THRESHOLD || analyserRms > BARGE_IN_ANALYSER_RMS_THRESHOLD) {
+              void this._handleBargeIn();
+            }
           }
           this._sendUpstream({ type: 'input_audio_buffer.append', audio: arrayBufferToBase64(pcm) });
         };
       }
       await this._setupPlayback();
       if (this.micCtx && this.micCtx.state === 'suspended') await this.micCtx.resume();
+    }
+
+    // Read the raw time-domain RMS from the mic analyser. Returns 0 when
+    // the analyser is not yet attached.
+    _readMicAnalyserRMS() {
+      if (!this.micAnalyser || !this.micTimeBuf) return 0;
+      this.micAnalyser.getFloatTimeDomainData(this.micTimeBuf);
+      let sumSq = 0;
+      for (let i = 0; i < this.micTimeBuf.length; i++) {
+        const s = this.micTimeBuf[i];
+        sumSq += s * s;
+      }
+      return Math.sqrt(sumSq / this.micTimeBuf.length);
     }
 
     async _setupPlayback() {
@@ -392,19 +477,50 @@
     }
 
     // ── Levels tick (drives the MicButton LevelMeter) ────────────
+    //
+    // Bug-4 fix: pick the right analyser source for the current state.
+    //   - listening / thinking → MIC analyser (user's voice waves)
+    //   - speaking             → PLAYBACK analyser (jarvis' voice waves)
+    //   - idle / interrupted   → flat low levels (no source to read)
+    //
+    // The design's MicButton only RENDERS the LevelMeter while listening,
+    // but we keep emitting a sensible value across all states so the
+    // React useState reflects ground truth and tests can assert on it.
     _tickLevels() {
+      const n = 7;
       const tick = () => {
-        if (this.analyser) {
+        let out = null;
+        if (this.status === STATUS_SPEAKING && this.analyser) {
           this.analyser.getByteFrequencyData(this.analyserBuf);
-          const n = 7;
           const groupSize = Math.max(1, Math.floor(this.analyserBuf.length / n));
-          const out = new Array(n);
+          out = new Array(n);
           for (let i = 0; i < n; i++) {
             let sum = 0;
             for (let j = 0; j < groupSize; j++) sum += this.analyserBuf[i * groupSize + j] || 0;
             out[i] = (sum / groupSize) / 255;
           }
-          if (typeof this.listener.onMicLevels === 'function') this.listener.onMicLevels(out);
+        } else if ((this.status === STATUS_LISTENING || this.status === STATUS_THINKING) && this.micAnalyser) {
+          this.micAnalyser.getByteFrequencyData(this.micAnalyserBuf);
+          // The mic spectrum is heavily weighted to low frequencies. Read
+          // the FFT below ~4 kHz where speech actually sits, split into 7
+          // log-spaced bins so the visual differentiates vowels/consonants
+          // instead of all-bars-equal.
+          const speechMax = Math.min(this.micAnalyserBuf.length, Math.floor(this.micAnalyserBuf.length * 0.5));
+          out = new Array(n);
+          for (let i = 0; i < n; i++) {
+            // Geometric bin spacing keeps low energy from dominating.
+            const lo = Math.floor(Math.pow(i / n, 1.4) * speechMax);
+            const hi = Math.floor(Math.pow((i + 1) / n, 1.4) * speechMax);
+            let sum = 0, count = 0;
+            for (let j = lo; j < hi; j++) { sum += this.micAnalyserBuf[j] || 0; count += 1; }
+            const v = count > 0 ? (sum / count) / 255 : 0;
+            // Stretch — the analyser's pre-normalised 0..1 sits in 0.05..0.4
+            // for typical speech; map to 0.1..1 so the bars actually wiggle.
+            out[i] = Math.max(0.08, Math.min(1, v * 2.8));
+          }
+        }
+        if (out && typeof this.listener.onMicLevels === 'function') {
+          this.listener.onMicLevels(out);
         }
         requestAnimationFrame(tick);
       };
