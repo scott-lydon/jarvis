@@ -106,7 +106,13 @@ function App() {
     const client = new window.JarvisClient({
       onState: (s) => setState(s),
       onMicLevels: (lvls) => setMicLevels(lvls),
-      onSessionReady: (uid) => setSessionId(uid.slice(0, 6)),
+      onSessionReady: (uid) => {
+        setSessionId(uid.slice(0, 6));
+        // Bug-B fix: mic is open + WebSocket session is live. Dismiss
+        // the seeded "Microphone permission required" banner so the user
+        // doesn't see a stale warning.
+        setBanners((b) => b.filter((x) => x.id !== 'mic_intro'));
+      },
       onUserTurn: (text) => {
         setItems((it) => it.concat([{
           id: `u_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
@@ -389,49 +395,79 @@ function App() {
 }
 
 // ─────────────────────────────────────────────────────────────
-// Mount inside iOS phone bezel (preserved verbatim from design)
+// Mount — Bug-A fix (2026-05-31): the previous Stage scaled the
+// 402×874 device frame with CSS `transform: scale(N)` where N < 1
+// on a small viewport. The browser rasterizes children at their
+// ORIGINAL size and downsamples in the compositor with bilinear
+// filtering → blurry text + jagged edges. Fix:
+//
+//   - Desktop / large viewport (≥520 px wide AND ≥920 px tall):
+//       render the IOSDevice at its native 402×874 with NO scaling.
+//       Always crisp.
+//   - Small viewport (anything narrower or shorter): drop the bezel
+//       entirely and let the App fill the viewport responsively.
+//       Mobile users wouldn't see a fake iPhone inside their real
+//       iPhone anyway.
 // ─────────────────────────────────────────────────────────────
 const DEVICE_W = 402;
 const DEVICE_H = 874;
+const DESKTOP_BREAKPOINT_W = 520;
+const DESKTOP_BREAKPOINT_H = 920;
 
 function Stage() {
-  const [scale, setScale] = useState(1);
+  const [isDesktop, setIsDesktop] = useState(() => {
+    if (typeof window === 'undefined') return true;
+    return window.innerWidth >= DESKTOP_BREAKPOINT_W && window.innerHeight >= DESKTOP_BREAKPOINT_H;
+  });
 
   useEffect(() => {
     const fit = () => {
-      const margin = 32;
-      const sw = (window.innerWidth  - margin) / DEVICE_W;
-      const sh = (window.innerHeight - margin) / DEVICE_H;
-      setScale(Math.min(1, sw, sh));
+      setIsDesktop(window.innerWidth >= DESKTOP_BREAKPOINT_W && window.innerHeight >= DESKTOP_BREAKPOINT_H);
     };
     fit();
     window.addEventListener('resize', fit);
     return () => window.removeEventListener('resize', fit);
   }, []);
 
+  // Inner stack: the App + its bezel padding. Shared between bezeled
+  // (desktop) and bezel-less (mobile) layouts so the App tree itself
+  // is identical and React doesn't unmount on resize.
+  const appShell = (
+    <div style={{
+      display: 'flex', flexDirection: 'column',
+      height: '100%', minHeight: 0,
+      background: 'var(--bg)',
+      color: 'var(--fg)',
+      paddingTop: isDesktop ? 54 : 'env(safe-area-inset-top, 12px)',
+    }}>
+      <App/>
+    </div>
+  );
+
+  if (isDesktop) {
+    return (
+      <div style={{
+        minHeight: '100vh',
+        display: 'grid', placeItems: 'center',
+        overflow: 'hidden',
+        background: 'radial-gradient(ellipse at top, #11141a 0%, var(--bg) 60%)',
+      }}>
+        <div style={{ width: DEVICE_W, height: DEVICE_H }}>
+          <IOSDevice dark>{appShell}</IOSDevice>
+        </div>
+      </div>
+    );
+  }
+  // Mobile / narrow viewport: no bezel, fullscreen App.
   return (
     <div style={{
       minHeight: '100vh',
-      display: 'grid', placeItems: 'center',
-      overflow: 'hidden',
-      background:
-        'radial-gradient(ellipse at top, #11141a 0%, var(--bg) 60%)',
+      width: '100%',
+      background: 'var(--bg)',
+      color: 'var(--fg)',
+      display: 'flex', flexDirection: 'column',
     }}>
-      <div style={{ width: DEVICE_W * scale, height: DEVICE_H * scale }}>
-        <div style={{ transform: `scale(${scale})`, transformOrigin: 'top left' }}>
-          <IOSDevice dark>
-            <div style={{
-              display: 'flex', flexDirection: 'column',
-              height: '100%', minHeight: 0,
-              background: 'var(--bg)',
-              color: 'var(--fg)',
-              paddingTop: 54,
-            }}>
-              <App/>
-            </div>
-          </IOSDevice>
-        </div>
-      </div>
+      {appShell}
     </div>
   );
 }

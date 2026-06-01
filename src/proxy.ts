@@ -115,14 +115,29 @@ export function runProxy(opts: ProxyOptions): void {
           // (PCM16 little-endian @ 24 kHz mono); only the type label moved.
           input: {
             format: { type: 'audio/pcm', rate: 24000 },
+            // Bug-C fix (2026-05-31): the default 500 ms silence threshold
+            // made Jarvis interject on every mid-sentence pause. People
+            // pause longer than half a second BETWEEN words when they're
+            // thinking ("Hey Jarvis... what's the weather"). The aggressive
+            // VAD also cut every phrase into tiny fragments that Whisper
+            // transcribed as single tokens ("you"), which then fell back
+            // to YouTube-corpus filler ("Thanks for watching"). Tuned:
+            //   - threshold 0.6: ignore brief room noise (was 0.55)
+            //   - silence_duration_ms 1200: natural conversation pause
+            //     (was 500 — half of what humans actually do)
+            //   - prefix_padding_ms 500: less word-clipping at phrase start
+            //     (was 300, sometimes lost the first phoneme)
             turn_detection: {
               type: 'server_vad',
-              threshold: 0.55,
-              prefix_padding_ms: 300,
-              silence_duration_ms: 500,
+              threshold: 0.6,
+              prefix_padding_ms: 500,
+              silence_duration_ms: 1200,
               create_response: true,
             },
-            transcription: { model: 'whisper-1' },
+            // Pass a language hint to Whisper so it doesn't try to match
+            // non-English phonemes. Compounds with the system prompt's
+            // 'Always respond in English' (lesson F5).
+            transcription: { model: 'whisper-1', language: 'en' },
           },
           output: {
             format: { type: 'audio/pcm', rate: 24000 },

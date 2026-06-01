@@ -52,6 +52,13 @@ const CONVERSATION_LINE = [
   // — same way ChatGPT would. Don't refuse with "I don't know" on
   // general-knowledge questions just because there's no matching tool.
   'For general-knowledge questions (history, science, definitions, math, advice, opinion, jokes, etc.), answer from your own knowledge confidently. You are not limited to information accessible via your tools.',
+  // Bug-E fix (2026-05-31): Whisper, when fed near-silence or a very
+  // brief noise fragment, frequently falls back to the most common
+  // phrases in its YouTube-heavy training corpus: "Thanks for
+  // watching!", "Don't forget to like and subscribe", "Subscribe to my
+  // channel", "If you enjoyed this video", "See you next time", etc.
+  // These are TRANSCRIPTION ARTIFACTS, not what the user said.
+  'If the transcribed message looks like generic YouTube filler — "Thanks for watching", "Don\'t forget to like and subscribe", "Subscribe to my channel", "If you enjoyed this video", "See you in the next one", or similar — IGNORE IT. It is a Whisper transcription artifact on near-silence, not a real user utterance. Stay quiet and keep waiting; do not respond, do not call a tool, do not comment on background noise or "whistling tones".',
 ].join(' ');
 
 const HALLUCINATION_GUARD = [
