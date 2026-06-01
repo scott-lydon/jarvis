@@ -99,10 +99,22 @@ export function runProxy(opts: ProxyOptions): void {
         // the line.
         instructions: systemPrompt,
         audio: {
-          // Lesson Y2: the FULLY NESTED shape. Flat audio_input/audio_output
-          // shapes silently fail and lead to garbage audio.
+          // Lesson Y2: FULLY NESTED `audio.input.format` shape. Flat
+          // `audio_input` shapes silently fail and lead to garbage audio.
+          //
+          // Lesson Y3 (2026-05-31, found via live deploy probe at
+          // https://jarvis-biyx.onrender.com): the GA enum for `format.type`
+          // is `audio/pcm | audio/pcmu | audio/pcma`. An older spec drop
+          // used `pcm16` and OpenAI ACCEPTED it for a window, then started
+          // rejecting it with:
+          //     invalid_request_error / invalid_value /
+          //     "Invalid value: 'pcm16'. Supported values are:
+          //      'audio/pcm', 'audio/pcmu', and 'audio/pcma'."
+          //     param: session.audio.input.format.type
+          // We send `audio/pcm` here. The wire encoding is unchanged
+          // (PCM16 little-endian @ 24 kHz mono); only the type label moved.
           input: {
-            format: { type: 'pcm16', rate: 24000 },
+            format: { type: 'audio/pcm', rate: 24000 },
             turn_detection: {
               type: 'server_vad',
               threshold: 0.55,
@@ -113,7 +125,7 @@ export function runProxy(opts: ProxyOptions): void {
             transcription: { model: 'whisper-1' },
           },
           output: {
-            format: { type: 'pcm16', rate: 24000 },
+            format: { type: 'audio/pcm', rate: 24000 },
             voice: env.realtimeVoice,
           },
         },

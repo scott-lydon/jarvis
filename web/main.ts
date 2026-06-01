@@ -94,6 +94,10 @@ class JarvisClient {
   private capturedSamplesSinceCommit = 0;
   private retriesUsed = 0;
   private intentionalClose = false;
+  // Demo mode: when a manifest is driving the session, we open the
+  // playback AudioContext but skip mic capture so the page does not
+  // hang on the browser's microphone permission prompt.
+  private demoMode = false;
 
   constructor() {
     this.userId = localStorage.getItem('jarvis.userId') ?? crypto.randomUUID();
@@ -225,7 +229,7 @@ class JarvisClient {
     }
     this.setStatus(STATUS_LISTENING, 'Connecting…');
     try {
-      await this.openAudio();
+      await this.openAudio({ withMic: true });
       this.openSocket();
     } catch (cause) {
       const isPermDenied = cause instanceof DOMException && cause.name === 'NotAllowedError';
@@ -242,6 +246,41 @@ class JarvisClient {
     }
   }
 
+  /**
+   * Demo-mode start: open ONLY the playback context + WebSocket. We do
+   * not call getUserMedia, so the page never hangs on the mic permission
+   * prompt — which is essential for Playwright / Chrome MCP runs where
+   * no human is around to grant mic access. The model still speaks
+   * because `response.audio.delta` payloads flow into the playback
+   * worklet exactly as in the mic-driven path.
+   */
+  async startDemo(): Promise<void> {
+    if (this.active) return;
+    this.active = true;
+    this.demoMode = true;
+    this.intentionalClose = false;
+    this.retriesUsed = 0;
+    const btn = document.getElementById('mic-btn') as HTMLButtonElement | null;
+    if (btn !== null) {
+      btn.setAttribute('aria-pressed', 'true');
+      const label = btn.querySelector('.mic-label');
+      if (label !== null) label.textContent = 'Demo running…';
+    }
+    this.setStatus(STATUS_LISTENING, 'Connecting (demo mode, no mic)…');
+    try {
+      await this.openAudio({ withMic: false });
+      this.openSocket();
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      this.setStatus(STATUS_ERROR, `Failed to start demo: ${message}`);
+      this.devLog(`startDemo failed: ${message}`);
+      this.active = false;
+      this.demoMode = false;
+      this.resetButton();
+      throw cause;
+    }
+  }
+
   private resetButton(): void {
     const btn = document.getElementById('mic-btn') as HTMLButtonElement | null;
     if (btn === null) return;
@@ -252,6 +291,7 @@ class JarvisClient {
 
   async stop(): Promise<void> {
     this.active = false;
+    this.demoMode = false;
     this.intentionalClose = true;
     this.resetButton();
     if (this.ws !== null) {
@@ -274,29 +314,41 @@ class JarvisClient {
 
   // ----- Audio context + worklets ------------------------------------
 
-  private async openAudio(): Promise<void> {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1, sampleRate: TARGET_RATE },
-      video: false,
-    });
-    this.micStream = stream;
+  /**
+   * Open the AudioContexts and worklets we need for this session.
+   *
+   * - `withMic: true` (default for tap-to-talk) opens BOTH the mic
+   *   capture context AND the playback context. Will block on the
+   *   browser's getUserMedia permission prompt.
+   * - `withMic: false` (demo mode) opens ONLY the playback context.
+   *   Used by runDemo() so a headless harness can drive the model
+   *   without the page hanging on a mic prompt.
+   */
+  private async openAudio(opts: { readonly withMic: boolean }): Promise<void> {
+    if (opts.withMic) {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1, sampleRate: TARGET_RATE },
+        video: false,
+      });
+      this.micStream = stream;
 
-    this.micCtx = new AudioContext({ sampleRate: TARGET_RATE, latencyHint: 'interactive' });
-    await this.micCtx.audioWorklet.addModule('./pcm-recorder.js');
-    const src = this.micCtx.createMediaStreamSource(stream);
-    this.micWorklet = new AudioWorkletNode(this.micCtx, 'pcm-recorder', {
-      processorOptions: { targetRate: TARGET_RATE },
-    });
-    src.connect(this.micWorklet);
-    this.micWorklet.port.onmessage = (ev: MessageEvent<{ pcm: ArrayBuffer; rms: number }>) => {
-      const pcm = ev.data.pcm;
-      const samples = pcm.byteLength / 2;
-      this.capturedSamplesSinceCommit += samples;
-      if (this.status === STATUS_SPEAKING && ev.data.rms > 0.04) {
-        this.handleBargeIn();
-      }
-      this.sendUpstream({ type: 'input_audio_buffer.append', audio: arrayBufferToBase64(pcm) });
-    };
+      this.micCtx = new AudioContext({ sampleRate: TARGET_RATE, latencyHint: 'interactive' });
+      await this.micCtx.audioWorklet.addModule('./pcm-recorder.js');
+      const src = this.micCtx.createMediaStreamSource(stream);
+      this.micWorklet = new AudioWorkletNode(this.micCtx, 'pcm-recorder', {
+        processorOptions: { targetRate: TARGET_RATE },
+      });
+      src.connect(this.micWorklet);
+      this.micWorklet.port.onmessage = (ev: MessageEvent<{ pcm: ArrayBuffer; rms: number }>) => {
+        const pcm = ev.data.pcm;
+        const samples = pcm.byteLength / 2;
+        this.capturedSamplesSinceCommit += samples;
+        if (this.status === STATUS_SPEAKING && ev.data.rms > 0.04) {
+          this.handleBargeIn();
+        }
+        this.sendUpstream({ type: 'input_audio_buffer.append', audio: arrayBufferToBase64(pcm) });
+      };
+    }
 
     this.playerCtx = new AudioContext({ sampleRate: TARGET_RATE, latencyHint: 'interactive' });
     await this.playerCtx.audioWorklet.addModule('./pcm-player.js');
@@ -307,7 +359,7 @@ class JarvisClient {
     this.playerWorklet.connect(this.analyser);
     this.analyser.connect(this.playerCtx.destination);
 
-    if (this.micCtx.state === 'suspended') await this.micCtx.resume();
+    if (this.micCtx !== null && this.micCtx.state === 'suspended') await this.micCtx.resume();
     if (this.playerCtx.state === 'suspended') await this.playerCtx.resume();
   }
 
@@ -511,7 +563,10 @@ class JarvisClient {
       manifest = manifestUrlOrObject;
     }
     this.devLog(`demo: ${manifest.name} (${String(manifest.steps.length)} steps)`);
-    await this.start();
+    await this.startDemo();
+    // Wait briefly for jarvis.session_ready so the first step lands on a
+    // live upstream session, not a buffer that gets dropped.
+    await new Promise<void>((resolve) => window.setTimeout(resolve, 1500));
     for (const step of manifest.steps) {
       if (step.delayMs !== undefined && step.delayMs > 0) {
         await new Promise<void>((r) => window.setTimeout(r, step.delayMs));
