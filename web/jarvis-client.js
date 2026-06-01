@@ -41,6 +41,12 @@
   // Diagnostic: the worklet posts a one-line summary every N seconds so we
   // can see in the browser console whether real audio is reaching us.
   const MIC_DIAG_INTERVAL_MS = 2000;
+  // Debug capture buffer — the LAST N seconds of mic PCM are kept in a
+  // circular buffer in memory so the user can play back EXACTLY what we
+  // sent upstream. Lets the user (and us) catch the case where Whisper
+  // returns "you" because our audio payload is silent.
+  const CAPTURE_BUFFER_SECONDS = 30;
+  const CAPTURE_BUFFER_SAMPLES = TARGET_RATE * CAPTURE_BUFFER_SECONDS; // 720_000 Int16 @ 24 kHz
 
   function arrayBufferToBase64(buf) {
     const bytes = new Uint8Array(buf);
@@ -56,6 +62,43 @@
     const out = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
     return out;
+  }
+
+  /**
+   * Wrap a mono Int16 PCM sample buffer in a RIFF/WAV header so the
+   * browser (and Finder Quick Look) can play it. Keeps the helper here
+   * — the client is the only thing that needs to emit WAVs.
+   */
+  function buildWav(samples, sampleRate) {
+    const numChannels = 1;
+    const bitsPerSample = 16;
+    const byteRate = sampleRate * numChannels * (bitsPerSample / 8);
+    const blockAlign = numChannels * (bitsPerSample / 8);
+    const dataSize = samples.byteLength;
+    const buf = new ArrayBuffer(44 + dataSize);
+    const view = new DataView(buf);
+    // "RIFF" + chunk size + "WAVE"
+    writeAscii(view, 0, 'RIFF');
+    view.setUint32(4, 36 + dataSize, true);
+    writeAscii(view, 8, 'WAVE');
+    // "fmt " sub-chunk
+    writeAscii(view, 12, 'fmt ');
+    view.setUint32(16, 16, true);        // sub-chunk size for PCM
+    view.setUint16(20, 1, true);         // audio format = PCM
+    view.setUint16(22, numChannels, true);
+    view.setUint32(24, sampleRate, true);
+    view.setUint32(28, byteRate, true);
+    view.setUint16(32, blockAlign, true);
+    view.setUint16(34, bitsPerSample, true);
+    // "data" sub-chunk
+    writeAscii(view, 36, 'data');
+    view.setUint32(40, dataSize, true);
+    // PCM payload
+    new Int16Array(buf, 44).set(samples);
+    return new Blob([buf], { type: 'audio/wav' });
+  }
+  function writeAscii(view, offset, text) {
+    for (let i = 0; i < text.length; i++) view.setUint8(offset + i, text.charCodeAt(i));
   }
 
   class JarvisClient {
@@ -91,6 +134,17 @@
       // Last mic-diagnostic post timestamp (ms). The worklet posts one
       // sampled summary per chunk; we log once per MIC_DIAG_INTERVAL_MS.
       this._lastDiagMs = 0;
+
+      // Circular capture buffer (Int16 LE @ 24 kHz mono). Holds the most
+      // recent CAPTURE_BUFFER_SECONDS of mic audio so the user can play
+      // back / download what we ACTUALLY sent upstream. Lets us see
+      // whether the audio payload is real or near-silence — without that
+      // visibility, Whisper returning "you" is unfalsifiable.
+      this._captureBuf = new Int16Array(CAPTURE_BUFFER_SAMPLES);
+      this._captureWrite = 0;     // next write index
+      this._captureCount = 0;     // total samples ever written (<= CAPTURE_BUFFER_SAMPLES)
+      // Bytes sent upstream (input_audio_buffer.append). Surface in dev panel.
+      this._micBytesSent = 0;
 
       this.status = STATUS_IDLE;
       this.active = false;
@@ -242,6 +296,9 @@
           }
           const pcm = data.pcm;
           const rms = data.rms || 0;
+          // Transparency: store every chunk we send upstream in a circular
+          // buffer so the user can play back EXACTLY what was captured.
+          this._appendToCaptureBuffer(pcm);
           // Bug-5 fix: dual-signal barge-in. Trip on either the worklet
           // RMS OR the analyser-time-domain RMS (raw mic, no quantize),
           // so a noise-suppressed worklet output doesn't HIDE a real
@@ -252,7 +309,9 @@
               void this._handleBargeIn();
             }
           }
-          this._sendUpstream({ type: 'input_audio_buffer.append', audio: arrayBufferToBase64(pcm) });
+          const base64 = arrayBufferToBase64(pcm);
+          this._micBytesSent += base64.length;
+          this._sendUpstream({ type: 'input_audio_buffer.append', audio: base64 });
         };
       }
       await this._setupPlayback();
@@ -525,6 +584,103 @@
         requestAnimationFrame(tick);
       };
       requestAnimationFrame(tick);
+    }
+
+    // ── Capture-buffer + playback (signal-flow transparency) ─────
+    //
+    // Public surface for the dev panel:
+    //   getCaptureSnapshot()  → { samples: Int16Array, sampleRate, durationSec }
+    //   playCapture()         → audible playback of the captured PCM
+    //   downloadCaptureWav()  → triggers a browser download of jarvis-capture.wav
+    //
+    // Every mic chunk that we send upstream is ALSO written into a
+    // 30-second circular buffer. Lets the user verify whether real
+    // audio reached the WebSocket — if playback sounds like silence,
+    // the failure is in the mic / browser audio stack, not in Whisper.
+
+    _appendToCaptureBuffer(pcmArrayBuffer) {
+      // Incoming buffer is the Int16 LE PCM the worklet posted (already
+      // detached from the worklet thread; safe to read).
+      const incoming = new Int16Array(pcmArrayBuffer);
+      const cap = this._captureBuf.length;
+      let writeIdx = this._captureWrite;
+      // Linear copy with wrap. For 50 ms chunks (~1200 samples) this is
+      // cheap; for big chunks this could be split into two .set() calls
+      // but the current 1200-sample shape never wraps in one go after
+      // the first lap, so keep it readable.
+      for (let i = 0; i < incoming.length; i++) {
+        this._captureBuf[writeIdx] = incoming[i] || 0;
+        writeIdx += 1;
+        if (writeIdx >= cap) writeIdx = 0;
+      }
+      this._captureWrite = writeIdx;
+      this._captureCount = Math.min(this._captureCount + incoming.length, cap);
+    }
+
+    /**
+     * Return the captured PCM in chronological order (oldest sample first).
+     * Returns null if nothing has been captured yet.
+     */
+    getCaptureSnapshot() {
+      if (this._captureCount === 0) return null;
+      const cap = this._captureBuf.length;
+      const startIdx = this._captureCount < cap
+        ? 0
+        : this._captureWrite; // oldest is the next write slot
+      const out = new Int16Array(this._captureCount);
+      let readIdx = startIdx;
+      for (let i = 0; i < this._captureCount; i++) {
+        out[i] = this._captureBuf[readIdx];
+        readIdx += 1;
+        if (readIdx >= cap) readIdx = 0;
+      }
+      return {
+        samples: out,
+        sampleRate: TARGET_RATE,
+        durationSec: this._captureCount / TARGET_RATE,
+        bytesSent: this._micBytesSent,
+      };
+    }
+
+    /**
+     * Play the captured PCM through a one-shot AudioContext so the user
+     * can HEAR what we sent upstream. Resolves when playback ends, or
+     * rejects on a missing buffer / Web-Audio failure.
+     */
+    async playCapture() {
+      const snap = this.getCaptureSnapshot();
+      if (!snap) throw new Error('Nothing captured yet — start a session and speak first.');
+      const ctx = new AudioContext({ sampleRate: snap.sampleRate });
+      const buffer = ctx.createBuffer(1, snap.samples.length, snap.sampleRate);
+      const channel = buffer.getChannelData(0);
+      for (let i = 0; i < snap.samples.length; i++) channel[i] = snap.samples[i] / 32768;
+      const node = ctx.createBufferSource();
+      node.buffer = buffer;
+      node.connect(ctx.destination);
+      await new Promise((resolve) => {
+        node.onended = () => { resolve(); };
+        node.start();
+      });
+      await ctx.close();
+    }
+
+    /**
+     * Build a WAV (RIFF) blob from the captured PCM and trigger a
+     * browser download.
+     */
+    downloadCaptureWav(filename) {
+      const snap = this.getCaptureSnapshot();
+      if (!snap) throw new Error('Nothing captured yet — start a session and speak first.');
+      const wav = buildWav(snap.samples, snap.sampleRate);
+      const url = URL.createObjectURL(wav);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename || `jarvis-capture-${new Date().toISOString().replace(/[:.]/g, '-')}.wav`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      // Revoke after a tick so the browser has time to start the download.
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
 
     // ── Demo manifest harness (preserved Slice 9 behavior) ───────

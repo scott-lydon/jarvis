@@ -101,16 +101,66 @@ function App() {
     }, 400);
   }, []);
 
+  // Bug-B robust fix (2026-05-31, second pass):
+  //
+  // The first pass removed the mic-intro banner inside onSessionReady,
+  // which depends on a server-side WebSocket round-trip. If anything
+  // between "user clicks Allow" and "jarvis.session_ready arrives"
+  // hiccups (network, server latency, proxy initialization), the banner
+  // stays even though the mic is fully granted and audio is flowing.
+  //
+  // The robust path is to also watch the browser's actual permission
+  // state via the Permissions API. This fires the moment the user taps
+  // Allow in the OS-level prompt — completely independent of our
+  // WebSocket. We use THREE redundant triggers:
+  //
+  //   1. Permissions API 'change' event (most direct)
+  //   2. onState callback when status flips away from 'idle' (means
+  //      start() got past _openAudio, which means getUserMedia
+  //      resolved, which means permission was granted)
+  //   3. onSessionReady (original trigger, kept as belt-and-suspenders)
+  //
+  // Any one of these three is sufficient to clear the banner.
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !navigator.permissions || !navigator.permissions.query) return;
+    let cancelled = false;
+    let statusRef = null;
+    const onChange = () => {
+      if (cancelled) return;
+      if (statusRef && statusRef.state === 'granted') {
+        setBanners((b) => b.filter((x) => x.id !== 'mic_intro'));
+      }
+    };
+    navigator.permissions.query({ name: 'microphone' }).then((status) => {
+      if (cancelled) return;
+      statusRef = status;
+      onChange();
+      try { status.addEventListener('change', onChange); } catch (_) { status.onchange = onChange; }
+    }).catch(() => {/* Permissions API not supported — triggers 2 + 3 still cover */});
+    return () => {
+      cancelled = true;
+      if (statusRef) {
+        try { statusRef.removeEventListener('change', onChange); } catch (_) { statusRef.onchange = null; }
+      }
+    };
+  }, []);
+
   // ── Boot the real client ──
   useEffect(() => {
     const client = new window.JarvisClient({
-      onState: (s) => setState(s),
+      onState: (s) => {
+        setState(s);
+        // Trigger #2: any non-idle state means the audio engine
+        // successfully opened (getUserMedia resolved), which means the
+        // user granted mic permission. Dismiss the seeded banner.
+        if (s !== 'idle') {
+          setBanners((b) => b.filter((x) => x.id !== 'mic_intro'));
+        }
+      },
       onMicLevels: (lvls) => setMicLevels(lvls),
       onSessionReady: (uid) => {
         setSessionId(uid.slice(0, 6));
-        // Bug-B fix: mic is open + WebSocket session is live. Dismiss
-        // the seeded "Microphone permission required" banner so the user
-        // doesn't see a stale warning.
+        // Trigger #3 (original): server WebSocket session live.
         setBanners((b) => b.filter((x) => x.id !== 'mic_intro'));
       },
       onUserTurn: (text) => {
