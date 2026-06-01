@@ -19,6 +19,10 @@ import { openDb, type Db } from './db.js';
 import { ToolDispatcher } from './tools/dispatcher.js';
 import { registerAllTools } from './tools/registry.js';
 import { maybeRollSummary } from './memory-summarizer.js';
+// BUG-DIAG-2026-06-01: debug-only mic-pipeline → HTTP Whisper isolation
+// endpoint. Delete this import + the route below when the modal is
+// removed. Grep for BUG-DIAG-2026-06-01.
+import { handleTranscribeTest } from './transcribe.js';
 
 function main(): void {
   const env = loadEnv();
@@ -79,6 +83,26 @@ function main(): void {
     if (url === '/realtime' || url.startsWith('/realtime?')) {
       res.writeHead(426, { 'Content-Type': 'text/plain' });
       res.end('upgrade required');
+      return;
+    }
+    // BUG-DIAG-2026-06-01: debug-only HTTP Whisper isolation endpoint.
+    // Used by the mic-test modal to verify mic capture + transcription
+    // independent of the Realtime WebSocket path. Remove when the modal
+    // is deleted.
+    if (url === '/api/transcribe-test') {
+      void handleTranscribeTest(req, res, { openaiApiKey: env.openaiApiKey })
+        .catch((err: unknown) => {
+          log.error({
+            event: 'transcribe.handler_threw',
+            message: err instanceof Error ? err.message : String(err),
+          });
+          // Best-effort error surface — the handler should have already
+          // responded in nearly all paths; this catches handler bugs.
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+            res.end(JSON.stringify({ error: { code: 'handler_threw', message: 'see server logs' } }));
+          }
+        });
       return;
     }
     if (staticAvailable) {

@@ -319,14 +319,36 @@ function App() {
     };
   }, [flashInterrupted]);
 
+  // BUG-DIAG-2026-06-01: mic-tap interception. Until the user has
+  // confirmed the two-phase diagnostic this session (or has been forced
+  // open via ?diag-force=1), tapping the mic opens the MicTestModal
+  // instead of starting the real Realtime session. Once confirmed, the
+  // session-storage flag is set and subsequent taps go straight to
+  // client.start(). Delete this state + the interceptor branch + the
+  // modal component below when the diagnostic is removed.
+  const [showMicTest, setShowMicTest] = useState(false);
   const handleMicTap = useCallback(() => {
     const c = clientRef.current;
     if (!c) return;
     if (c.isActive()) {
       void c.stop();
-    } else {
-      void c.start();
+      return;
     }
+    const force = typeof window.jarvisMicTestForcedOpen === 'function' && window.jarvisMicTestForcedOpen();
+    const passed = typeof window.jarvisMicTestSessionPassed === 'function' && window.jarvisMicTestSessionPassed();
+    if (force || !passed) {
+      setShowMicTest(true);
+      return;
+    }
+    void c.start();
+  }, []);
+  const handleMicTestConfirm = useCallback(() => {
+    setShowMicTest(false);
+    const c = clientRef.current;
+    if (c) void c.start();
+  }, []);
+  const handleMicTestDismiss = useCallback(() => {
+    setShowMicTest(false);
   }, []);
 
   const handleReset = useCallback(() => {
@@ -525,6 +547,15 @@ function App() {
 
       <Footer onReset={handleReset} turns={turnsCount}
               showForce={showForce} onToggleForce={() => setShowForce(v => !v)}/>
+
+      {/* BUG-DIAG-2026-06-01: two-phase mic + Whisper diagnostic. */}
+      {showMicTest && window.JarvisMicTestModal && (
+        <window.JarvisMicTestModal
+          clientRef={clientRef}
+          onConfirm={handleMicTestConfirm}
+          onDismiss={handleMicTestDismiss}
+        />
+      )}
 
       <TweaksPanel>
         <TweakSection label="Accent"/>

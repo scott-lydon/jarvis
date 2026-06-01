@@ -750,6 +750,121 @@
       setTimeout(() => URL.revokeObjectURL(url), 1000);
     }
 
+    // ── BUG-DIAG-2026-06-01 mic-test harness ─────────────────────
+    //
+    // Records `durationSec` seconds of audio through the SAME worklet +
+    // downsample path the Realtime session uses, stops the mic, and
+    // resolves with the captured PCM. No WebSocket is opened; this is a
+    // pure local recording used to isolate "is the mic capturing real
+    // audio?" from "is OpenAI's Realtime API hearing it?" — both
+    // questions previously had to be debugged together. After this
+    // resolves, the caller can:
+    //   - playCapture()           → hear what was captured
+    //   - downloadCaptureWav()    → save it as WAV for offline review
+    //   - testTranscribeViaHttp() → run it through OpenAI's HTTP
+    //                               Whisper endpoint independently of
+    //                               the Realtime path, for comparison
+    //
+    // The capture buffer is the same circular Int16 buffer used in
+    // production, so what gets recorded IS what would go upstream.
+    async startMicTestRecording(durationSec) {
+      if (this.active) {
+        throw new Error('Cannot run mic test while a live session is active. Stop the session first.');
+      }
+      // Reset the capture buffer state so the test starts fresh.
+      this._captureBuf = new Int16Array(CAPTURE_BUFFER_SAMPLES);
+      this._captureWrite = 0;
+      this._captureCount = 0;
+      this._micBytesSent = 0;
+
+      // Open mic via the existing _openAudio path so this test exercises
+      // the SAME getUserMedia → AudioContext → worklet downsample path
+      // production uses. We do NOT open the WebSocket — the worklet
+      // posts chunks to the main thread and we accumulate them into the
+      // capture buffer via the existing handler, but the _sendUpstream
+      // call short-circuits because this.ws is null.
+      this.active = true;       // gate other calls
+      this.demoMode = false;
+      this.intentionalClose = false;
+      try {
+        await this._openAudio({ withMic: true });
+      } catch (cause) {
+        this.active = false;
+        throw cause;
+      }
+
+      // Record for `durationSec` seconds, then stop the mic.
+      const ms = Math.max(500, Math.floor(durationSec * 1000));
+      await new Promise((resolve) => window.setTimeout(resolve, ms));
+
+      // Tear down the mic but keep the capture buffer intact.
+      try {
+        if (this.micWorklet) { try { this.micWorklet.disconnect(); } catch (_) {} this.micWorklet = null; }
+        if (this.micAnalyser) { try { this.micAnalyser.disconnect(); } catch (_) {} this.micAnalyser = null; }
+        if (this.micSource) { try { this.micSource.disconnect(); } catch (_) {} this.micSource = null; }
+        if (this.micStream) {
+          const tracks = this.micStream.getTracks();
+          for (let i = 0; i < tracks.length; i++) { try { tracks[i].stop(); } catch (_) {} }
+          this.micStream = null;
+        }
+        if (this.micCtx) { try { await this.micCtx.close(); } catch (_) {} this.micCtx = null; }
+        await this._teardownPlayback();
+      } finally {
+        this.active = false;
+        this._setStatus(STATUS_IDLE);
+      }
+
+      const snap = this.getCaptureSnapshot();
+      if (snap === null) {
+        throw new Error('Mic recording produced ZERO samples. The mic is not capturing — check OS-level microphone permission and that no other app has the mic open exclusively.');
+      }
+      return snap;
+    }
+
+    /**
+     * POST the most recently captured PCM (built into a RIFF/WAV blob)
+     * to /api/transcribe-test on the same origin. Resolves with the
+     * JSON the server returned (either { text } on success or
+     * { error: { code, message, ... } } on any failure). Throws only on
+     * network-level failures the caller could not reach the server at
+     * all.
+     */
+    async testTranscribeViaHttp() {
+      const snap = this.getCaptureSnapshot();
+      if (snap === null) {
+        throw new Error('No capture buffer to transcribe. Call startMicTestRecording() first.');
+      }
+      const wav = buildWav(snap.samples, snap.sampleRate);
+      let res;
+      try {
+        res = await fetch('/api/transcribe-test', {
+          method: 'POST',
+          headers: { 'Content-Type': 'audio/wav' },
+          body: wav,
+        });
+      } catch (cause) {
+        const msg = (cause && cause.message) ? cause.message : String(cause);
+        throw new Error(`Could not reach /api/transcribe-test: ${msg}`);
+      }
+      const text = await res.text();
+      let parsed;
+      try { parsed = JSON.parse(text); }
+      catch (cause) {
+        const msg = (cause && cause.message) ? cause.message : String(cause);
+        throw new Error(`/api/transcribe-test returned non-JSON (status ${res.status}): ${msg}. Body: ${text.slice(0, 200)}`);
+      }
+      // Add the HTTP status + audio metadata so the modal can show what
+      // was sent in addition to what came back.
+      return {
+        status: res.status,
+        ok: res.ok,
+        bytesSent: wav.size,
+        sampleRate: snap.sampleRate,
+        durationSec: snap.durationSec,
+        body: parsed,
+      };
+    }
+
     // ── Demo manifest harness (preserved Slice 9 behavior) ───────
     async runDemo(manifestUrlOrObject) {
       let manifest;

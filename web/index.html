@@ -29,6 +29,11 @@
   <script type="text/babel" data-presets="env,react" src="tweaks-panel.jsx"></script>
   <script type="text/babel" data-presets="env,react" src="ios-frame.jsx"></script>
   <script type="text/babel" data-presets="env,react" src="components.jsx"></script>
+  <!-- BUG-DIAG-2026-06-01: mic + Whisper diagnostic modal. Loaded
+       BEFORE main.jsx so window.JarvisMicTestModal is in scope when
+       main.jsx renders. Delete this <script> tag when the modal is
+       removed (grep BUG-DIAG-2026-06-01). -->
+  <script type="text/babel" data-presets="env,react" src="mic-test-modal.jsx"></script>
   <script type="text/babel" data-presets="env,react" src="main.jsx"></script>
 </body>
 </html>

@@ -50,6 +50,9 @@ const COPY_PLAN = [
   { root: WEB_DIR, from: 'index.html',       to: 'index.html'       },
   { root: WEB_DIR, from: 'main.jsx',         to: 'main.jsx'         },
   { root: WEB_DIR, from: 'jarvis-client.js', to: 'jarvis-client.js' },
+  // BUG-DIAG-2026-06-01: mic + Whisper isolation modal. Delete this
+  // line when the modal is removed.
+  { root: WEB_DIR, from: 'mic-test-modal.jsx', to: 'mic-test-modal.jsx' },
   // Audio worklets — loaded by jarvis-client.js via AudioContext.audioWorklet.addModule.
   { root: PUBLIC_DIR, from: 'pcm-recorder.js', to: 'pcm-recorder.js' },
   { root: PUBLIC_DIR, from: 'pcm-player.js',   to: 'pcm-player.js'   },
