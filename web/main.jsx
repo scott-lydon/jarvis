@@ -76,6 +76,9 @@ function App() {
   const [sessionId, setSessionId] = useState('—');
   const [capOpen, setCapOpen]     = useState(false);
   const [streamingId, setStreamingId] = useState(null);
+  // Dev signal-flow telemetry (drives the DevSignalPanel below).
+  const [micDiag, setMicDiag]   = useState(null);
+  const [lastUserTranscript, setLastUserTranscript] = useState('');
   const logRef = useRef(null);
   const clientRef = useRef(null);
   // Track in-flight tool calls so we can resolve a pending tile when the
@@ -101,34 +104,36 @@ function App() {
     }, 400);
   }, []);
 
-  // Bug-B robust fix (2026-05-31, second pass):
-  //
-  // The first pass removed the mic-intro banner inside onSessionReady,
-  // which depends on a server-side WebSocket round-trip. If anything
-  // between "user clicks Allow" and "jarvis.session_ready arrives"
-  // hiccups (network, server latency, proxy initialization), the banner
-  // stays even though the mic is fully granted and audio is flowing.
-  //
-  // The robust path is to also watch the browser's actual permission
-  // state via the Permissions API. This fires the moment the user taps
-  // Allow in the OS-level prompt — completely independent of our
-  // WebSocket. We use THREE redundant triggers:
-  //
-  //   1. Permissions API 'change' event (most direct)
-  //   2. onState callback when status flips away from 'idle' (means
-  //      start() got past _openAudio, which means getUserMedia
-  //      resolved, which means permission was granted)
-  //   3. onSessionReady (original trigger, kept as belt-and-suspenders)
-  //
-  // Any one of these three is sufficient to clear the banner.
+  // Bug-B fix (2026-05-31, simplified final): one trigger — the moment
+  // getUserMedia resolves — dismisses the mic-intro banner. No WebSocket
+  // round-trip, no status-machine inference. The Permissions API change
+  // path stays ONLY to detect REVOCATION: if the browser ever flips the
+  // permission back to 'denied' after a successful grant, we surface a
+  // new banner with how-to-re-enable instructions because the user has
+  // to do that from the browser's site-settings UI now.
   useEffect(() => {
     if (typeof navigator === 'undefined' || !navigator.permissions || !navigator.permissions.query) return;
     let cancelled = false;
     let statusRef = null;
     const onChange = () => {
       if (cancelled) return;
-      if (statusRef && statusRef.state === 'granted') {
-        setBanners((b) => b.filter((x) => x.id !== 'mic_intro'));
+      if (!statusRef) return;
+      if (statusRef.state === 'denied') {
+        // The user must change this from the browser's site settings;
+        // we cannot re-trigger the OS-level prompt programmatically.
+        setBanners((b) => {
+          if (b.some((x) => x.id === 'mic_revoked')) return b;
+          return b.concat([{
+            id: 'mic_revoked', kind: 'err',
+            title: 'Microphone access was revoked',
+            body: 'Chrome → site settings (the lock icon in the URL bar) → Microphone → Allow. Then reload this page.',
+            dismissible: true,
+          }]);
+        });
+      } else if (statusRef.state === 'granted') {
+        // Belt-and-suspenders: also clear the intro banner here if for
+        // some reason onMicGranted didn't fire.
+        setBanners((b) => b.filter((x) => x.id !== 'mic_intro' && x.id !== 'mic_revoked'));
       }
     };
     navigator.permissions.query({ name: 'microphone' }).then((status) => {
@@ -136,7 +141,7 @@ function App() {
       statusRef = status;
       onChange();
       try { status.addEventListener('change', onChange); } catch (_) { status.onchange = onChange; }
-    }).catch(() => {/* Permissions API not supported — triggers 2 + 3 still cover */});
+    }).catch(() => {/* Permissions API not supported — onMicGranted still works */});
     return () => {
       cancelled = true;
       if (statusRef) {
@@ -148,22 +153,19 @@ function App() {
   // ── Boot the real client ──
   useEffect(() => {
     const client = new window.JarvisClient({
-      onState: (s) => {
-        setState(s);
-        // Trigger #2: any non-idle state means the audio engine
-        // successfully opened (getUserMedia resolved), which means the
-        // user granted mic permission. Dismiss the seeded banner.
-        if (s !== 'idle') {
-          setBanners((b) => b.filter((x) => x.id !== 'mic_intro'));
-        }
-      },
+      onState: (s) => setState(s),
       onMicLevels: (lvls) => setMicLevels(lvls),
-      onSessionReady: (uid) => {
-        setSessionId(uid.slice(0, 6));
-        // Trigger #3 (original): server WebSocket session live.
+      onMicDiag: (d) => setMicDiag(d),
+      // Bug-B fix (final): the ONLY local trigger to dismiss the
+      // mic-intro banner. Fires the instant getUserMedia resolves —
+      // i.e. the instant the user taps Allow in the OS-level prompt.
+      // No WebSocket round-trip required.
+      onMicGranted: () => {
         setBanners((b) => b.filter((x) => x.id !== 'mic_intro'));
       },
+      onSessionReady: (uid) => setSessionId(uid.slice(0, 6)),
       onUserTurn: (text) => {
+        setLastUserTranscript(text);
         setItems((it) => it.concat([{
           id: `u_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
           kind: 'turn',
@@ -416,6 +418,13 @@ function App() {
         </div>
       </div>
 
+      {showForce && (
+        <DevSignalPanel
+          clientRef={clientRef}
+          diag={micDiag}
+          lastUserTranscript={lastUserTranscript}
+        />
+      )}
       {showForce && <ForceStateBar state={state} onSet={handleForceState}/>}
 
       <Footer onReset={handleReset} turns={turnsCount}
@@ -441,6 +450,91 @@ function App() {
         />
       </TweaksPanel>
     </>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// DevSignalPanel — surfaces the new transparency hooks added in
+// jarvis-client.js so the user can SEE the audio signal flow:
+//   - Diagnostic readout from the worklet (srcRate / chunks /
+//     meanAbs / maxAbs / bytesSent) — tells us if real audio is
+//     reaching the worklet at all.
+//   - Latest raw user transcript Whisper sent back — tells us
+//     what the upstream model actually heard.
+//   - "Play my last 30s" button → playCapture() → audible playback
+//     of exactly what we sent upstream.
+//   - "Download as WAV" button → downloadCaptureWav() so the
+//     audio file can be inspected directly.
+// Visible only in dev mode (?dev=1 or #dev or the footer toggle).
+// ─────────────────────────────────────────────────────────────
+function DevSignalPanel({ clientRef, diag, lastUserTranscript }) {
+  const [status, setStatus] = useState(null);
+  const handlePlay = useCallback(() => {
+    const c = clientRef.current;
+    if (!c) return;
+    setStatus('playing…');
+    c.playCapture()
+      .then(() => setStatus('playback done'))
+      .catch((e) => setStatus(`error: ${e?.message || String(e)}`));
+  }, [clientRef]);
+  const handleDownload = useCallback(() => {
+    const c = clientRef.current;
+    if (!c) return;
+    try {
+      c.downloadCaptureWav();
+      setStatus('downloaded WAV');
+    } catch (e) {
+      setStatus(`error: ${e?.message || String(e)}`);
+    }
+  }, [clientRef]);
+
+  const cell = { padding: '2px 6px', fontSize: 11, color: 'var(--fg-muted)' };
+  const numCell = { ...cell, fontFamily: 'var(--f-mono)', color: 'var(--fg-dim)' };
+  const btn = {
+    padding: '4px 10px', fontSize: 11,
+    background: 'var(--surface-2)',
+    border: '1px solid var(--border-strong)',
+    borderRadius: 6,
+    color: 'var(--fg)',
+    cursor: 'pointer',
+  };
+  return (
+    <div style={{
+      margin: '0 12px 8px',
+      padding: '8px 10px',
+      background: 'var(--surface-1)',
+      border: '1px solid var(--border)',
+      borderRadius: 8,
+      fontSize: 11,
+      color: 'var(--fg-muted)',
+    }}>
+      <div style={{
+        display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 6,
+      }}>
+        <span style={{ fontFamily: 'var(--f-mono)', color: 'var(--accent)', fontSize: 10, letterSpacing: '0.08em' }}>
+          DEV · signal flow
+        </span>
+        <span style={{ color: 'var(--fg-faint)' }}>{status || ''}</span>
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '2px 8px' }}>
+        <div style={cell}>worklet srcRate</div>
+        <div style={numCell}>{diag?.srcRate ?? '—'} Hz → {diag?.targetRate ?? 24000} Hz</div>
+        <div style={cell}>chunks in last {diag?.elapsedMs ? Math.round(diag.elapsedMs) : '—'} ms</div>
+        <div style={numCell}>{diag?.chunks ?? '—'}</div>
+        <div style={cell}>mean abs amplitude</div>
+        <div style={numCell}>{diag?.meanAbs != null ? diag.meanAbs.toFixed(4) : '—'} {diag?.meanAbs === 0 ? '(SILENCE detected upstream!)' : ''}</div>
+        <div style={cell}>peak abs amplitude</div>
+        <div style={numCell}>{diag?.maxAbs != null ? diag.maxAbs.toFixed(4) : '—'}</div>
+        <div style={cell}>last upstream transcript</div>
+        <div style={{ ...numCell, color: lastUserTranscript ? 'var(--fg)' : 'var(--fg-faint)' }}>
+          {lastUserTranscript || '— (Whisper has not returned anything yet)'}
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+        <button type="button" style={btn} onClick={handlePlay}>▶ Play my last 30 s</button>
+        <button type="button" style={btn} onClick={handleDownload}>⬇ Download WAV</button>
+      </div>
+    </div>
   );
 }
 

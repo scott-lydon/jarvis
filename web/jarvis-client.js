@@ -264,6 +264,15 @@
           video: false,
         });
         this.micStream = stream;
+        // Bug-B robust trigger (2026-05-31, third pass): fire onMicGranted
+        // the INSTANT getUserMedia resolves. This is the only point in the
+        // entire pipeline where we KNOW the user just tapped Allow — no
+        // WebSocket round-trip required, no inference from a status flip.
+        // The React layer uses this to dismiss the mic-intro banner with
+        // zero latency.
+        if (typeof this.listener.onMicGranted === 'function') {
+          try { this.listener.onMicGranted(); } catch (_) { /* listener bug — ignore */ }
+        }
         // No forced sampleRate — the AudioContext defaults to the device
         // rate, the worklet sees `sampleRate` and downsamples to 24 kHz.
         this.micCtx = new AudioContext({ latencyHint: 'interactive' });
