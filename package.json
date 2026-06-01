@@ -23,8 +23,8 @@
     "smoke:deployed": "vitest run tests/smoke/deployed.test.ts",
     "smoke:slice11": "JARVIS_REQUIRE_LIVE_GITHUB=1 vitest run tests/smoke/github-agentic.test.ts --testTimeout=30000",
     "db:migrate": "tsx src/db/migrate.ts",
-    "web:dev": "vite --config web/vite.config.ts",
-    "web:build": "vite build --config web/vite.config.ts"
+    "web:dev": "node scripts/web-build.js && echo 'Static bundle built. Serve via the Node server (npm run dev).'",
+    "web:build": "node scripts/web-build.js"
   },
   "dependencies": {
     "@octokit/rest": "^21.1.1",
@@ -43,7 +43,6 @@
     "tsx": "^4.19.2",
     "typescript": "^5.7.2",
     "typescript-eslint": "^8.18.2",
-    "vite": "^6.0.5",
     "vitest": "^2.1.8"
   }
 }
