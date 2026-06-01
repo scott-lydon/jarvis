@@ -68,10 +68,14 @@ describe('buildSystemPrompt', () => {
     expect(out).toContain('Memory: OFFLINE');
   });
 
-  it('contains the hallucination guard (US-06)', () => {
+  it('contains the narrow live-data hallucination guard (US-06, rewritten 2026-05-31)', () => {
     const d = new ToolDispatcher();
     const out = buildSystemPrompt({ env, dispatcher: d, user: emptyUserContext('u', true) });
-    expect(out).toMatch(/grounded in a tool response/i);
+    // The guard fires only on LIVE-data claims now (weather values, PR
+    // counts, today's news), not on general knowledge.
+    expect(out).toMatch(/live source/i);
+    // And the prompt positions Jarvis as conversational FIRST.
+    expect(out).toMatch(/conversational|hold normal.*conversations/i);
   });
 });
 

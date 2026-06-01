@@ -39,32 +39,11 @@ const TEST_ENV = {
   realtimeUrlOverride: null,
 } as const;
 
-// 20 representative un-groundable prompt categories. Each one is the
-// kind of question a model with no tool/memory access for that topic
-// could quietly fabricate an answer to. If the prompt-level guard is
-// missing, hallucination is unconstrained.
-const UNGROUNDABLE_CATEGORIES = [
-  'weather without the weather tool',
-  'GitHub PR list without a token',
-  'GitHub issue body without a token',
-  'recent merges without a token',
-  'private repository contents',
-  'a user\'s home address',
-  'today\'s news headlines',
-  'live stock prices',
-  'live sports scores',
-  'an arbitrary commit hash',
-  'a colleague\'s phone number',
-  'the user\'s social security number',
-  'tomorrow\'s weather forecast',
-  'an internal service URL',
-  'a private API key value',
-  'a Slack message the assistant did not receive',
-  'a file path the assistant has never been told about',
-  'historical trivia outside training',
-  'a person\'s exact age',
-  'a flight\'s gate number',
-] as const;
+// (LIVE_DATA_CATEGORIES now lives inside the describe block below — the
+// new property is narrower than the old blanket guard: only categories
+// that REQUIRE a live tool source must trigger the "no live source"
+// language. General-knowledge categories were removed from this list
+// because the model is now ALLOWED to answer them from training.)
 
 const fakeWeather: ToolDefinition<{ location: string }> = {
   name: 'wttr_get',
@@ -88,49 +67,72 @@ function promptWithOfflineMemory(): string {
   return buildSystemPrompt({ env: TEST_ENV, dispatcher: new ToolDispatcher(), user: emptyUserContext('u', false) });
 }
 
-describe('US-06 hallucination guard — prompt-level property', () => {
-  for (const category of UNGROUNDABLE_CATEGORIES) {
-    it(`carries an explicit "do not guess" directive for category: ${category}`, () => {
-      // The text of the directive must be identical regardless of category
-      // — it's a single rule, not a per-category one. We assert each
-      // category once so that if the rule is ever weakened, the failure
-      // surface lists every prompt category that would be left exposed.
+// Rewritten (2026-05-31) after the user caught that the previous, much
+// stricter prompt was forcing the model into tool-router mode for every
+// turn — including ambiguous transcripts like "you", which it routed to
+// weather. The new prompt frames Jarvis as a CONVERSATIONAL AI FIRST that
+// happens to also have tools. The property below pins the new contract:
+//   - LIVE-data hallucination is still forbidden (numeric weather values,
+//     PR counts, etc.) — this is the narrow, surgical guard.
+//   - General-knowledge questions are answered like any LLM would.
+//   - Ambiguous transcripts get a conversational response, NOT a tool call.
+
+describe('US-06 hallucination guard — narrow live-data guard, not blanket', () => {
+  // Live-data un-groundable categories: these MUST trigger the
+  // "no live source" directive. General knowledge categories (history,
+  // science, math, definitions) are NOT in this list — they're answered
+  // from training, the same way ChatGPT would answer them.
+  const LIVE_DATA_CATEGORIES = [
+    'weather without the weather tool',
+    'GitHub PR list without a token',
+    'GitHub issue body without a token',
+    'recent merges without a token',
+    'private repository contents',
+    'today\'s news headlines',
+    'live stock prices',
+    'live sports scores',
+    'an arbitrary commit hash',
+    'tomorrow\'s weather forecast',
+  ] as const;
+
+  for (const category of LIVE_DATA_CATEGORIES) {
+    it(`carries the narrow live-data "no live source" directive for: ${category}`, () => {
       const prompts = [promptWithSomeToolsAndUser(), promptWithNoTools(), promptWithOfflineMemory()];
       for (const p of prompts) {
-        // Required directives:
-        expect(p, `prompt must instruct "say I don't know" (category: ${category})`).toMatch(/I don't know/i);
-        expect(p, `prompt must name tool / memory / this prompt as the only grounding (${category})`).toMatch(/grounded in a tool response, in this prompt, or in the user memory/i);
-        expect(p, `prompt must forbid guessing (${category})`).toMatch(/Do not guess/i);
+        expect(p, `prompt must require a tool-grounded source for LIVE data (${category})`).toMatch(/live source/i);
         expect(p, `prompt must instruct honest tool-error surfacing (${category})`).toMatch(/surface the error honestly/i);
       }
     });
   }
 
-  it('the "I don\'t know" directive is one line and unconditional', () => {
+  it('the prompt positions the model as conversational FIRST, tools SECOND', () => {
     const p = promptWithSomeToolsAndUser();
-    // No "if applicable", "when in doubt", etc. — the rule is unconditional.
-    const guardLine = p.split('\n').find((l) => l.toLowerCase().includes("i don't know")) ?? '';
-    expect(guardLine, 'I don\'t know directive must be present').not.toBe('');
-    expect(guardLine.toLowerCase()).not.toMatch(/when in doubt|if applicable|usually/);
+    expect(p, 'prompt must name Jarvis as a conversational AI').toMatch(/conversational|hold normal.*conversations|talk(ing)? with the user/i);
+    // Compare against the OLD failure mode: "(and only these)" — that
+    // exact wording is what forced the model into tool-router mode.
+    expect(p, 'prompt must NOT say "and only these"').not.toMatch(/and only these/i);
   });
 
-  it('the slow-tool reminder is also in the prompt (US-02 paired)', () => {
+  it('the prompt explicitly permits general-knowledge answers without a tool', () => {
+    const p = promptWithSomeToolsAndUser();
+    expect(p, 'prompt must say general-knowledge questions can be answered from the model\'s own knowledge').toMatch(/general[- ]knowledge|own knowledge/i);
+  });
+
+  it('the prompt tells the model to engage conversationally on ambiguous/short input', () => {
+    const p = promptWithSomeToolsAndUser();
+    // The directive: short/ambiguous input → conversational response, NOT tool call.
+    expect(p).toMatch(/short, unclear, or ambiguous|engage like a person|do NOT default to calling a tool/i);
+  });
+
+  it('the slow-tool reminder is still in the prompt (US-02)', () => {
     expect(promptWithSomeToolsAndUser()).toMatch(/briefly say what you are doing first/i);
   });
 
-  it('the barge-in reminder is in the prompt (US-04 paired)', () => {
+  it('the barge-in reminder is in the prompt (US-04)', () => {
     expect(promptWithSomeToolsAndUser()).toMatch(/stop immediately and listen/i);
   });
 
-  it('the unclear-transcript guard is in the prompt (Bug-2 fix, 2026-05-31)', () => {
-    // Real production failure: Whisper transcribes silence/noise to the
-    // single token "you", and without this directive the model would
-    // route that as a confident weather lookup. The directive forces the
-    // model to ASK FOR REPETITION instead of calling a tool.
-    const p = promptWithSomeToolsAndUser();
-    expect(p).toMatch(/single short token/i);
-    expect(p).toMatch(/"you"/i);
-    expect(p).toMatch(/repeat/i);
-    expect(p).toMatch(/Do not call a tool on an unclear transcript/i);
+  it('memory-offline state still surfaces in the prompt (US-03)', () => {
+    expect(promptWithOfflineMemory()).toMatch(/Memory: OFFLINE/);
   });
 });

@@ -24,23 +24,42 @@ export interface SessionInputs {
   readonly user: PersistedUserContext;
 }
 
-const IDENTITY_LINE =
-  "You are Jarvis, a voice-first assistant for frontline workers (field technicians, on-site operators, emergency responders). Speak naturally — like a coworker on a radio — concise sentences, no headers, no markdown, no lists read out as 'bullet one'.";
+const IDENTITY_LINE = [
+  // Bug-2 root-cause rewrite (2026-05-31): the previous identity line
+  // ("voice-first assistant for frontline workers") plus the capability
+  // block's "you can call these tools (and only these)" framing made the
+  // model behave as a tool router with NO general conversational ability.
+  // When the user said anything the model couldn't immediately map to a
+  // tool (e.g. a one-word transcript like "you"), it scanned its 9 tools,
+  // picked the one closest to "general question someone might ask", and
+  // called weather. That was the prompt's fault, not the model's.
+  //
+  // gpt-realtime is a frontier model. It can hold any conversation. This
+  // identity now positions it as a CONVERSATIONAL AI FIRST that ALSO has
+  // a few live tools. Tools are optional, not the point.
+  "You are Jarvis, a friendly voice-first AI assistant. You hold normal, intelligent conversations about anything — exactly the way a capable AI like ChatGPT would. You happen to also have a small set of live tools (real-time weather, GitHub queries, durable memory) you CAN use when the user clearly wants real-time data, but most interactions are just conversation. Speak naturally, concise sentences, no headers, no markdown, no lists read out as 'bullet one'.",
+].join(' ');
 
 const LANGUAGE_LINE =
   // Lesson F5: GA Realtime silently coerces to other languages on borderline audio.
   'Always respond in English.';
 
+const CONVERSATION_LINE = [
+  // Bug-2 fix (rewrite): be a normal conversational partner FIRST. Tools
+  // are a fallback when real-time data is clearly needed.
+  'Default to a conversational response. If the user says something short, unclear, or ambiguous (a single word like "you", "okay", "right", a transcription artifact, or just casual chatter), engage like a person would — ask what they mean, play along, or share a thought — do NOT default to calling a tool. Tools are only for when the user is clearly asking for real-time data you cannot answer from your own knowledge.',
+  // For general knowledge that DOES live in your training, just answer
+  // — same way ChatGPT would. Don't refuse with "I don't know" on
+  // general-knowledge questions just because there's no matching tool.
+  'For general-knowledge questions (history, science, definitions, math, advice, opinion, jokes, etc.), answer from your own knowledge confidently. You are not limited to information accessible via your tools.',
+].join(' ');
+
 const HALLUCINATION_GUARD = [
-  'If a factual claim cannot be grounded in a tool response, in this prompt, or in the user memory below, say "I don\'t know" or "I don\'t have reliable information on that." Do not guess numbers, names, repository details, weather values, dates, or commit hashes.',
+  // Narrowed (2026-05-31): the guard NOW only fires on specific
+  // real-world-data claims (PR counts, weather values, commit hashes).
+  // For general knowledge, the model behaves like a normal LLM.
+  'For LIVE, time-sensitive, or specific external-system data — current weather values, current PR/issue counts on a specific repo, specific commit hashes, today\'s news — if you cannot ground the claim in a tool response, in this prompt, or in the user\'s memory below, say "I don\'t have a live source for that right now" rather than guessing a number.',
   'When a tool errors, surface the error honestly ("I tried to reach GitHub but it timed out.") rather than fabricating.',
-  // Bug-2 fix (2026-05-31): if the transcript is short, unclear, or
-  // appears off-topic from prior conversation, ASK THE USER TO REPEAT
-  // instead of inventing a tool call. The voice transcription pipeline
-  // (Whisper) frequently falls back to single tokens like "you" on
-  // silenced input; without this guard the model would route those
-  // single-token transcripts into a confident weather lookup.
-  'If the user\'s transcribed message is a single short token (such as "you", "the", "uh") or otherwise unclear with no context, say "Sorry, I didn\'t catch that — could you repeat?" Do not call a tool on an unclear transcript.',
 ].join(' ');
 
 const SLOW_TOOL_LINE =
@@ -72,6 +91,7 @@ export function buildSystemPrompt(input: SessionInputs): string {
   const caps = dispatcher.capabilities(env);
   return [
     IDENTITY_LINE,
+    CONVERSATION_LINE,
     capabilityBlock(caps),
     memoryBlock(user),
     preferencesBlock(user),
@@ -83,17 +103,22 @@ export function buildSystemPrompt(input: SessionInputs): string {
 }
 
 function capabilityBlock(caps: readonly CapabilityEntry[]): string {
+  // Soft framing (2026-05-31 rewrite): tools are AVAILABLE, not REQUIRED.
+  // The previous "you can call these tools (and only these)" wording
+  // pushed the model into tool-routing mode, which made it call weather
+  // on any ambiguous input. Now: tools are optional, only used when the
+  // user clearly wants live data.
   const available = caps.filter((c) => c.available);
   const disabled = caps.filter((c) => !c.available);
   const availLines = available.length === 0
-    ? 'You have no callable tools right now; answer from this prompt and the user memory only.'
-    : 'You can call these tools (and only these):\n' +
+    ? 'No live tools are wired right now; answer purely from your own knowledge and the user memory below.'
+    : 'When the user clearly asks for live or real-time data, you may call one of these tools (you do NOT have to call a tool on every turn):\n' +
       available.map((c) => `  - ${c.name}: ${c.summary}`).join('\n');
   const disabledLines = disabled.length === 0
     ? ''
-    : '\nThese tools are disabled in this environment; mention only when relevant:\n' +
+    : '\nThese tools are disabled in this environment; only mention them if the user asks directly:\n' +
       disabled.map((c) => `  - ${c.name}: ${c.disabledReason ?? 'unavailable'}`).join('\n');
-  return `Capabilities (LIVE):\n${availLines}${disabledLines}`;
+  return `Available tools:\n${availLines}${disabledLines}`;
 }
 
 function memoryBlock(user: PersistedUserContext): string {
