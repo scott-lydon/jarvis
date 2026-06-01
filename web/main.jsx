@@ -1,0 +1,439 @@
+// main.jsx — REAL Jarvis main screen, wired to the live proxy.
+//
+// This file REPLACES the design's mock main.jsx (which used SEED_TURNS +
+// fake mic levels + force-state). Every piece of UI state here flows from
+// real upstream events delivered by window.JarvisClient (jarvis-client.js):
+//
+//   jarvis.session_ready              → state becomes 'listening'
+//   input_audio_buffer.speech_started → state stays 'listening', caption flips
+//   input_audio_buffer.speech_stopped → state becomes 'thinking'
+//   jarvis.filler                     → state becomes 'thinking', filler text
+//   response.audio.delta              → state becomes 'speaking', PCM enqueued
+//   response.audio.done               → state returns to 'listening'
+//   response.audio_transcript.done    → push assistant TurnRow
+//   conversation.item.input_audio_transcription.completed → push user TurnRow
+//   jarvis.tool_result                → push ToolTile (resolves the pending tile)
+//   jarvis.error / jarvis.upstream_closed → ErrorBanner
+//
+// Barge-in (US-04): the client's getUserMedia path detects user voice while
+// status === 'speaking' and calls JarvisClient.bargeIn(), which CLOSES the
+// playback AudioContext and recreates a fresh one (~<100ms silence on Web
+// Audio — the only reliable path; clearing the worklet queue is not enough
+// because the AudioContext output buffer keeps playing whatever was already
+// scheduled). The UI flashes 'interrupted' for ~400ms then returns to
+// 'listening'.
+
+const { useState, useEffect, useRef, useMemo, useCallback } = React;
+
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "accent": "#4ade80",
+  "density": "tight",
+  "showExamples": true
+}/*EDITMODE-END*/;
+
+function nowTime() {
+  const d = new Date();
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+}
+function pad(n) { return String(n).padStart(2, '0'); }
+
+function hexA(hex, a) {
+  const m = hex.replace('#', '');
+  const full = m.length === 3 ? m.split('').map(c => c + c).join('') : m;
+  const r = parseInt(full.slice(0, 2), 16);
+  const g = parseInt(full.slice(2, 4), 16);
+  const b = parseInt(full.slice(4, 6), 16);
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+function App() {
+  // ── Dev mode (force-state bar). On via ?dev=1 or #dev. The bar drives the
+  //    LIVE client (start/stop), not a mock — there is no mock here. ──
+  const devFromUrl = useMemo(() => {
+    try {
+      const p = new URLSearchParams(window.location.search);
+      return p.get('dev') === '1' || /\bdev\b/.test(window.location.hash);
+    } catch { return false; }
+  }, []);
+  const [showForce, setShowForce] = useState(devFromUrl);
+
+  // ── Tweaks ──
+  const [t, setTweak] = useTweaks(TWEAK_DEFAULTS);
+
+  // Apply accent CSS var live
+  useEffect(() => {
+    document.documentElement.style.setProperty('--accent', t.accent);
+    document.documentElement.style.setProperty('--accent-soft', hexA(t.accent, 0.14));
+    document.documentElement.style.setProperty('--accent-ring', hexA(t.accent, 0.32));
+    document.documentElement.style.setProperty('--accent-glow', hexA(t.accent, 0.55));
+  }, [t.accent]);
+
+  // ── App state — driven entirely by the live client. ──
+  const [state, setState]         = useState('idle');
+  const [items, setItems]         = useState([]); // turns + tool tiles
+  const [banners, setBanners]     = useState([]);
+  const [micLevels, setMicLevels] = useState([0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1]);
+  const [sessionId, setSessionId] = useState('—');
+  const [capOpen, setCapOpen]     = useState(false);
+  const [streamingId, setStreamingId] = useState(null);
+  const logRef = useRef(null);
+  const clientRef = useRef(null);
+  // Track in-flight tool calls so we can resolve a pending tile when the
+  // jarvis.tool_result lands. Realtime tool_results don't carry args, so we
+  // stash the args at function_call_arguments.done time… except the proxy
+  // does NOT forward those to clients, so for now we render the tool tile
+  // only with the resolved result (args = {} until we plumb them through).
+  const pendingToolsRef = useRef([]); // FIFO of pending tool names
+
+  // Auto-scroll log to bottom on new items
+  useEffect(() => {
+    if (!logRef.current) return;
+    logRef.current.scrollTop = logRef.current.scrollHeight;
+  }, [items.length, streamingId]);
+
+  // Briefly flash the 'interrupted' state on barge-in, then revert to listening.
+  const flashInterruptedRef = useRef(null);
+  const flashInterrupted = useCallback(() => {
+    setState('interrupted');
+    if (flashInterruptedRef.current) clearTimeout(flashInterruptedRef.current);
+    flashInterruptedRef.current = window.setTimeout(() => {
+      setState((s) => (s === 'interrupted' ? 'listening' : s));
+    }, 400);
+  }, []);
+
+  // ── Boot the real client ──
+  useEffect(() => {
+    const client = new window.JarvisClient({
+      onState: (s) => setState(s),
+      onMicLevels: (lvls) => setMicLevels(lvls),
+      onSessionReady: (uid) => setSessionId(uid.slice(0, 6)),
+      onUserTurn: (text) => {
+        setItems((it) => it.concat([{
+          id: `u_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          kind: 'turn',
+          role: 'user',
+          time: nowTime(),
+          text,
+        }]));
+      },
+      onAssistantTurn: (text) => {
+        const id = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+        setItems((it) => it.concat([{
+          id,
+          kind: 'turn',
+          role: 'assistant',
+          time: nowTime(),
+          text,
+        }]));
+        setStreamingId(null);
+      },
+      onFiller: (text, tool) => {
+        // Filler is a spoken cue we surface in the log as a transient assistant
+        // turn so the user gets a textual signal in parallel with the audio.
+        setItems((it) => it.concat([{
+          id: `f_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          kind: 'turn',
+          role: 'assistant',
+          time: nowTime(),
+          text,
+        }]));
+        pendingToolsRef.current.push(tool);
+        setItems((it) => it.concat([{
+          id: `tool_pending_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          kind: 'tool',
+          name: tool,
+          duration: null,
+          pending: true,
+          args: {},
+          result: null,
+        }]));
+      },
+      onToolResult: (tool, ok, durationMs, result) => {
+        // Resolve the most-recent pending tile for this tool name.
+        setItems((it) => {
+          let resolved = false;
+          const next = it.map((row) => {
+            if (resolved) return row;
+            if (row.kind === 'tool' && row.name === tool && row.pending) {
+              resolved = true;
+              return { ...row, pending: false, duration: durationMs, result, error: ok ? null : result };
+            }
+            return row;
+          });
+          if (!resolved) {
+            // No pending tile (no filler fired) — append a finished tile.
+            next.push({
+              id: `tool_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+              kind: 'tool',
+              name: tool,
+              duration: durationMs,
+              pending: false,
+              args: {},
+              result,
+              error: ok ? null : result,
+            });
+          }
+          return next;
+        });
+      },
+      onError: (title, body) => {
+        setBanners((b) => b.concat([{
+          id: `err_${Date.now()}`,
+          kind: 'err',
+          title,
+          body,
+          dismissible: true,
+        }]));
+      },
+      onMicPermissionDenied: (detail) => {
+        setBanners((b) => b.concat([{
+          id: `mic_${Date.now()}`,
+          kind: 'err',
+          title: 'Microphone permission denied',
+          body: detail,
+          dismissible: true,
+        }]));
+      },
+      onBargeIn: () => flashInterrupted(),
+    });
+    clientRef.current = client;
+    // Demo-harness globals — preserve existing behavior so headless harnesses
+    // can drive the page without mic capture.
+    window.__demoReady = true;
+    window.__startDemo = async (m) => { await client.runDemo(m); };
+    // Auto-start demo if URL carries ?demo=<manifest>.
+    try {
+      const params = new URLSearchParams(window.location.search);
+      const manifest = params.get('demo');
+      if (manifest && manifest.length > 0) {
+        window.setTimeout(() => { void client.runDemo(manifest); }, 100);
+      }
+    } catch (_) { /* ignore */ }
+    return () => {
+      try { client.stop(); } catch (_) { /* ignore */ }
+      clientRef.current = null;
+    };
+  }, [flashInterrupted]);
+
+  const handleMicTap = useCallback(() => {
+    const c = clientRef.current;
+    if (!c) return;
+    if (c.isActive()) {
+      void c.stop();
+    } else {
+      void c.start();
+    }
+  }, []);
+
+  const handleReset = useCallback(() => {
+    const c = clientRef.current;
+    if (c) void c.stop();
+    setItems([]);
+    setBanners([]);
+    setStreamingId(null);
+    setState('idle');
+  }, []);
+
+  // Dev force-state: in production we never fake state, so the force-state
+  // bar in dev mode now DRIVES the client (start = listening, idle = stop).
+  // No SEED_TURNS, ever.
+  const handleForceState = useCallback((s) => {
+    const c = clientRef.current;
+    if (!c) return;
+    if (s === 'idle') {
+      void c.stop();
+      return;
+    }
+    if (!c.isActive()) void c.start();
+    // Other states (thinking/speaking/interrupted) flow from the upstream
+    // event stream; we don't override them. Surfacing this as a hint:
+    // dev clicks 'speaking' but the underlying state stays where the model
+    // actually is.
+  }, []);
+
+  const dismissBanner = useCallback((id) => {
+    setBanners(b => b.filter(x => x.id !== id));
+  }, []);
+
+  // First-time mic-permission CTA. Visible by default until the user taps
+  // the mic; the client will replace it with a real "denied" banner if the
+  // user denies. Per UX review 2026-05-31: non-dismissible + CTA pill.
+  useEffect(() => {
+    setBanners([{
+      id: 'mic_intro', kind: 'warn',
+      title: 'Microphone permission required',
+      body: 'Jarvis can\'t hear you until you grant access.',
+      dismissible: false,
+      cta: {
+        label: 'Grant microphone access',
+        onClick: () => handleMicTap(),
+      },
+    }]);
+  }, [handleMicTap]);
+
+  const turnsCount = useMemo(
+    () => items.filter(i => i.kind === 'turn').length,
+    [items]
+  );
+
+  return (
+    <>
+      <Header
+        state={state}
+        sessionId={sessionId}
+        dev={showForce}
+        capabilityChip={
+          <CapabilityChip
+            open={capOpen}
+            onToggle={() => setCapOpen(v => !v)}
+          />
+        }
+      />
+
+      <CapabilityPanel
+        open={capOpen}
+        onClose={() => setCapOpen(false)}
+        onPick={() => setCapOpen(false)}
+      />
+
+      <div ref={logRef} className="scroll-area" style={{
+        flex: 1, minHeight: 0, overflowY: 'auto',
+        paddingBottom: 8,
+      }}>
+        {banners.map(b => (
+          <ErrorBanner key={b.id} banner={b} onDismiss={dismissBanner}/>
+        ))}
+
+        {state === 'idle' && items.length === 0 && t.showExamples && (
+          <ExamplePrompts/>
+        )}
+
+        {items.map(it => {
+          if (it.kind === 'tool') return <ToolTile key={it.id} tool={it} dev={showForce}/>;
+          return (
+            <TurnRow
+              key={it.id}
+              turn={it}
+              density={t.density}
+              streaming={it.id === streamingId && it.role === 'assistant'}
+            />
+          );
+        })}
+
+        {state === 'thinking' && (
+          <div style={{ padding: '6px 14px 14px' }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 8, marginBottom: 4 }}>
+              <span className="mono" style={{
+                fontSize: 10, letterSpacing: '0.08em',
+                color: 'var(--warn)', fontWeight: 600,
+              }}>JARVIS</span>
+              <span className="mono tnum" style={{ fontSize: 10, color: 'var(--fg-faint)' }}>
+                {nowTime()}
+              </span>
+            </div>
+            <div style={{
+              display: 'inline-flex', alignItems: 'center', gap: 8,
+              padding: '6px 10px', background: 'var(--surface-1)',
+              border: '1px solid var(--border)', borderRadius: 6,
+            }}>
+              <ThinkingDots/>
+              <span style={{ fontSize: 11.5, color: 'var(--fg-muted)' }}>routing</span>
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={{
+        padding: '4px 0 4px',
+        display: 'flex', flexDirection: 'column', alignItems: 'center',
+        gap: 0,
+        borderTop: '1px solid var(--border)',
+        background: 'linear-gradient(180deg, transparent, rgba(0,0,0,0.4))',
+      }}>
+        <MicButton state={state} onTap={handleMicTap} micLevels={micLevels}/>
+        <div style={{
+          fontSize: 11, color: 'var(--fg-muted)',
+          marginTop: -2, marginBottom: 6,
+          minHeight: 14,
+        }}>
+          {STATE_META[state].hint}
+        </div>
+      </div>
+
+      {showForce && <ForceStateBar state={state} onSet={handleForceState}/>}
+
+      <Footer onReset={handleReset} turns={turnsCount}
+              showForce={showForce} onToggleForce={() => setShowForce(v => !v)}/>
+
+      <TweaksPanel>
+        <TweakSection label="Accent"/>
+        <TweakColor
+          label="Color" value={t.accent}
+          options={['#4ade80', '#60a5fa', '#fb923c', '#22d3ee', '#a78bfa', '#f43f5e']}
+          onChange={(v) => setTweak('accent', v)}
+        />
+        <TweakSection label="Conversation log"/>
+        <TweakRadio
+          label="Density" value={t.density}
+          options={['tight', 'medium', 'comfy']}
+          onChange={(v) => setTweak('density', v)}
+        />
+        <TweakToggle
+          label="Show examples in idle"
+          value={t.showExamples}
+          onChange={(v) => setTweak('showExamples', v)}
+        />
+      </TweaksPanel>
+    </>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────
+// Mount inside iOS phone bezel (preserved verbatim from design)
+// ─────────────────────────────────────────────────────────────
+const DEVICE_W = 402;
+const DEVICE_H = 874;
+
+function Stage() {
+  const [scale, setScale] = useState(1);
+
+  useEffect(() => {
+    const fit = () => {
+      const margin = 32;
+      const sw = (window.innerWidth  - margin) / DEVICE_W;
+      const sh = (window.innerHeight - margin) / DEVICE_H;
+      setScale(Math.min(1, sw, sh));
+    };
+    fit();
+    window.addEventListener('resize', fit);
+    return () => window.removeEventListener('resize', fit);
+  }, []);
+
+  return (
+    <div style={{
+      minHeight: '100vh',
+      display: 'grid', placeItems: 'center',
+      overflow: 'hidden',
+      background:
+        'radial-gradient(ellipse at top, #11141a 0%, var(--bg) 60%)',
+    }}>
+      <div style={{ width: DEVICE_W * scale, height: DEVICE_H * scale }}>
+        <div style={{ transform: `scale(${scale})`, transformOrigin: 'top left' }}>
+          <IOSDevice dark>
+            <div style={{
+              display: 'flex', flexDirection: 'column',
+              height: '100%', minHeight: 0,
+              background: 'var(--bg)',
+              color: 'var(--fg)',
+              paddingTop: 54,
+            }}>
+              <App/>
+            </div>
+          </IOSDevice>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<Stage/>);
