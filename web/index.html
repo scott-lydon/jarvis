@@ -26,9 +26,9 @@
        TweaksPanel + useTweaks hook), then ios-frame, then components, then main.
        main.jsx is the REAL wiring (not the design's mock) — it consumes
        window.JarvisClient and renders the design components. -->
-  <script type="text/babel" data-type="module" src="tweaks-panel.jsx"></script>
-  <script type="text/babel" data-type="module" src="ios-frame.jsx"></script>
-  <script type="text/babel" data-type="module" src="components.jsx"></script>
-  <script type="text/babel" data-type="module" src="main.jsx"></script>
+  <script type="text/babel" data-presets="env,react" src="tweaks-panel.jsx"></script>
+  <script type="text/babel" data-presets="env,react" src="ios-frame.jsx"></script>
+  <script type="text/babel" data-presets="env,react" src="components.jsx"></script>
+  <script type="text/babel" data-presets="env,react" src="main.jsx"></script>
 </body>
 </html>
