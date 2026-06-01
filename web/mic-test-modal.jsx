@@ -309,11 +309,11 @@ function MicTestModal({ clientRef, onConfirm, onDismiss }) {
 
           {phase === PHASE_RESULT && (
             <>
-              <div><strong>Step 2 done — Whisper transcript:</strong></div>
+              <div><strong>Step 2 done — gpt-4o-transcribe transcript:</strong></div>
               <div style={transcriptBox}>
                 {transcript && transcript.length > 0
                   ? transcript
-                  : '(empty — Whisper returned no text. Audio may have been too short or silent.)'}
+                  : '(empty — the model returned no text. Audio may have been too short, silent, or the anti-filler prompt correctly suppressed a hallucination.)'}
               </div>
               {transcribeMeta && (
                 <div style={subdued}>
@@ -321,16 +321,18 @@ function MicTestModal({ clientRef, onConfirm, onDismiss }) {
                   · {transcribeMeta.durationSec.toFixed(1)} s
                   @ {transcribeMeta.sampleRate} Hz
                   · HTTP {transcribeMeta.status}
+                  · model gpt-4o-transcribe (file mode, higher accuracy)
                 </div>
               )}
               <div style={subdued}>
-                If this transcript matches what you said, the audio
-                pipeline + Whisper itself are both working — any
-                weirdness during a real session points at the Realtime
-                streaming path. If it does not match, EITHER Whisper
-                hallucinated on this clean audio (a Whisper model bug
-                we cannot fix) OR our PCM encoding is subtly off
-                (sample rate label, endianness, bit depth).
+                <strong>Interpretation:</strong>
+                {' '}If this transcript matches what you said, the mic
+                capture path is fine. The live session uses a
+                different model (gpt-realtime-whisper, streaming-
+                optimized) — any difference between the two transcripts
+                points at the streaming path or VAD config. If both
+                transcripts are wrong, either the audio itself is
+                garbled OR our PCM encoding is subtly off.
               </div>
               <div style={ctaRow}>
                 <button type="button" style={btnPrimary} onClick={handleConfirmAndStart}>

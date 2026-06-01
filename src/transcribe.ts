@@ -109,10 +109,34 @@ export async function handleTranscribeTest(
   // Wrap the body in a Blob so FormData treats it as a file upload.
   const blob = new Blob([body], { type: 'audio/wav' });
   form.append('file', blob, 'mic-test.wav');
-  form.append('model', 'whisper-1');
+  // Lesson Y4 (2026-06-01): use `gpt-4o-transcribe`, the higher-
+  // accuracy file-mode transcription model, for the diagnostic. The
+  // realtime path uses `gpt-realtime-whisper` (streaming-optimized);
+  // this HTTP path doesn't need streaming, so we get the most accurate
+  // transcript OpenAI offers — which is what the modal shows to the
+  // user as ground truth. Source:
+  // developers.openai.com/api/docs/guides/realtime-transcription
+  form.append('model', 'gpt-4o-transcribe');
   // The Realtime API session is configured with language: 'en' (see
   // src/proxy.ts), so pin the same here for an apples-to-apples test.
   form.append('language', 'en');
+  // Bias the model AWAY from the YouTube-corpus filler phrases that
+  // bit the user in the realtime path. The OpenAI HTTP transcription
+  // endpoint accepts a `prompt` field that biases token probabilities;
+  // we use it to make the diagnostic robust against the exact
+  // hallucination class we're investigating. The realtime endpoint
+  // does NOT accept this field (per current docs), which is part of
+  // why a separate file-mode diagnostic exists in the first place.
+  form.append(
+    'prompt',
+    'This is a casual conversation with a voice assistant about general '
+    + 'topics. The speaker is NOT a YouTuber, NOT signing off a video, '
+    + 'and NOT thanking viewers. Do NOT transcribe generic video-filler '
+    + 'phrases like "Thanks for watching", "See you next time", "Like '
+    + 'and subscribe", or similar — those phrases do not occur in this '
+    + 'audio. If you cannot make out what was said, return an empty '
+    + 'transcript instead of guessing.',
+  );
 
   let upstream: Response;
   try {

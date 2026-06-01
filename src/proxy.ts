@@ -135,10 +135,31 @@ export function runProxy(opts: ProxyOptions): void {
               silence_duration_ms: 1200,
               create_response: true,
             },
-            // Pass a language hint to Whisper so it doesn't try to match
-            // non-English phonemes. Compounds with the system prompt's
-            // 'Always respond in English' (lesson F5).
-            transcription: { model: 'whisper-1', language: 'en' },
+            // Lesson Y4 (2026-06-01): switch from `whisper-1` to
+            // `gpt-realtime-whisper`. whisper-1 is the LEGACY model
+            // ("existing Whisper integrations… not natively streaming")
+            // — per OpenAI's Realtime transcription docs it's
+            // retiring around June 2026 anyway. The streaming-chunk
+            // hallucinations the user kept hitting ("I'll see you
+            // next time", "Gillingham thinks he's a king…") are the
+            // exact failure mode whisper-1 has when OpenAI's server
+            // VAD feeds it short turn-boundary clips without
+            // streaming context: it falls back to its training-
+            // corpus priors, which are YouTube-heavy. The newer
+            // gpt-realtime-whisper was built specifically for live
+            // streaming sessions like this one and is the documented
+            // recommendation for low-latency realtime transcription.
+            //
+            // Source: developers.openai.com/api/docs/guides/realtime-transcription
+            //
+            // language=en stays so the model doesn't try to match
+            // non-English phonemes. The Realtime endpoint does NOT
+            // accept a transcription `prompt` field for steering
+            // (only the HTTP /v1/audio/transcriptions endpoint does;
+            // see src/transcribe.ts where we use it on the diagnostic
+            // path). Vocabulary biasing in the realtime path stays
+            // on the system-prompt side (CONVERSATION_LINE).
+            transcription: { model: 'gpt-realtime-whisper', language: 'en' },
           },
           output: {
             format: { type: 'audio/pcm', rate: 24000 },
@@ -148,6 +169,17 @@ export function runProxy(opts: ProxyOptions): void {
         tools,
         tool_choice: 'auto',
       },
+      // Lesson Y5 (2026-06-01): request transcription logprobs so the
+      // proxy gains a confidence signal it can use to filter low-
+      // confidence transcripts in a follow-up pass (today the SPOT
+      // artifact list is the only post-hoc filter; logprobs let us
+      // discard hallucinations the artifact list doesn't catch).
+      // Cost: a handful of extra bytes per transcript event. We are
+      // not USING logprobs yet — this lands the data plumbing so a
+      // future commit can add a confidence threshold without another
+      // round-trip to OpenAI. See:
+      // developers.openai.com/api/docs/guides/realtime-transcription
+      include: ['item.input_audio_transcription.logprobs'],
     };
     upstream.send(JSON.stringify(sessionUpdate));
     // Tell the downstream client the session is live; the client uses
