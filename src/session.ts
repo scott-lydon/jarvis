@@ -7,6 +7,7 @@
 
 import { randomUUID } from 'node:crypto';
 
+import { formatArtifactListForPrompt, formatStopCommandsForPrompt } from './audio-artifacts.js';
 import type { JarvisEnv } from './env.js';
 import type { CapabilityEntry, ToolDispatcher } from './tools/dispatcher.js';
 
@@ -44,6 +45,13 @@ const LANGUAGE_LINE =
   // Lesson F5: GA Realtime silently coerces to other languages on borderline audio.
   'Always respond in English.';
 
+// Bug-I (2026-06-01): Whisper YouTube-corpus artifacts AND stop
+// commands now both come from src/audio-artifacts.ts (the SPOT module).
+// The proxy uses the same source to suppress / cancel at runtime, so
+// the prompt and the runtime behavior cannot drift apart. The lists
+// rendered here are illustrative SAMPLES — the proxy's matcher is
+// authoritative; this directive is belt-and-suspenders for the case
+// where the proxy filter misses a near-match.
 const CONVERSATION_LINE = [
   // Bug-2 fix (rewrite): be a normal conversational partner FIRST. Tools
   // are a fallback when real-time data is clearly needed.
@@ -52,13 +60,18 @@ const CONVERSATION_LINE = [
   // — same way ChatGPT would. Don't refuse with "I don't know" on
   // general-knowledge questions just because there's no matching tool.
   'For general-knowledge questions (history, science, definitions, math, advice, opinion, jokes, etc.), answer from your own knowledge confidently. You are not limited to information accessible via your tools.',
-  // Bug-E fix (2026-05-31): Whisper, when fed near-silence or a very
-  // brief noise fragment, frequently falls back to the most common
-  // phrases in its YouTube-heavy training corpus: "Thanks for
-  // watching!", "Don't forget to like and subscribe", "Subscribe to my
-  // channel", "If you enjoyed this video", "See you next time", etc.
-  // These are TRANSCRIPTION ARTIFACTS, not what the user said.
-  'If the transcribed message looks like generic YouTube filler — "Thanks for watching", "Don\'t forget to like and subscribe", "Subscribe to my channel", "If you enjoyed this video", "See you in the next one", or similar — IGNORE IT. It is a Whisper transcription artifact on near-silence, not a real user utterance. Stay quiet and keep waiting; do not respond, do not call a tool, do not comment on background noise or "whistling tones".',
+  // Bug-E fix (2026-05-31, re-rendered from SPOT 2026-06-01): Whisper,
+  // when fed near-silence, falls back to its YouTube-corpus training
+  // phrases. The proxy filters these at the wire and the user-turn
+  // event NEVER reaches you in normal operation; this directive only
+  // matters for near-matches the regex missed.
+  `If the transcribed message looks like generic YouTube filler — ${formatArtifactListForPrompt()}, or similar — IGNORE IT. It is a Whisper transcription artifact on near-silence, not a real user utterance. Stay quiet and keep waiting; do not respond, do not call a tool, do not comment on background noise or "whistling tones".`,
+  // Bug-J (2026-06-01): stop commands. When the user cuts you off with
+  // a short "be quiet" command — ${formatStopCommandsForPrompt()}, or
+  // similar — the user wants SILENCE. Do not generate a follow-up
+  // turn, do not say "okay", do not summarize what you were about to
+  // say. Stay quiet until the user speaks again with a real prompt.
+  `When the user says a short stop command (${formatStopCommandsForPrompt()}, or similar), they are cutting you off and want silence. Do NOT generate any follow-up — no "okay", no "got it", no summary, no question. Stay completely quiet until the user speaks again with a real prompt. The proxy will also cancel any in-flight response on its end; your role is to not queue a NEW one.`,
 ].join(' ');
 
 const HALLUCINATION_GUARD = [

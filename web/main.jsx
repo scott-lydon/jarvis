@@ -79,6 +79,11 @@ function App() {
   // Dev signal-flow telemetry (drives the DevSignalPanel below).
   const [micDiag, setMicDiag]   = useState(null);
   const [lastUserTranscript, setLastUserTranscript] = useState('');
+  // Bug-I/J transparency (2026-06-01): when the proxy discards an
+  // utterance as a Whisper artifact or stop command, surface it in the
+  // dev panel so the user can see WHAT was filtered and why. Tied to
+  // jarvis.input_discarded events (see jarvis-client.js).
+  const [lastDiscarded, setLastDiscarded] = useState(null);
   // Bug-F fix (2026-06-01): make the mic-intro banner state-derived
   // instead of imperative. The previous "push it into banners on mount,
   // pop it on onMicGranted" model had three separate dismissal triggers
@@ -291,6 +296,9 @@ function App() {
         }]));
       },
       onBargeIn: () => flashInterrupted(),
+      onInputDiscarded: (reason, transcript) => {
+        setLastDiscarded({ reason, transcript, at: nowTime() });
+      },
     });
     clientRef.current = client;
     // Demo-harness globals — preserve existing behavior so headless harnesses
@@ -440,7 +448,16 @@ function App() {
           <ErrorBanner key={b.id} banner={b} onDismiss={dismissBanner}/>
         ))}
 
-        {state === 'idle' && items.length === 0 && t.showExamples && (
+        {(state === 'idle' || state === 'listening') && items.length === 0 && t.showExamples && (
+          // Bug-K (2026-06-01): the previous gate showed ExamplePrompts
+          // ONLY in 'idle', so the instant the user tapped the mic and
+          // state flipped to 'listening' the suggestion list disappeared.
+          // The user reported "the suggestion topics also went away"
+          // because the banner-gone moment coincided with the state
+          // flip. Loosened: prompts stay visible during 'listening'
+          // until the first real turn lands (items.length > 0). The
+          // first transcribed user turn or assistant turn pushes items
+          // > 0 and the prompts retire on their own.
           <ExamplePrompts/>
         )}
 
@@ -501,6 +518,7 @@ function App() {
           clientRef={clientRef}
           diag={micDiag}
           lastUserTranscript={lastUserTranscript}
+          lastDiscarded={lastDiscarded}
         />
       )}
       {showForce && <ForceStateBar state={state} onSet={handleForceState}/>}
@@ -545,7 +563,7 @@ function App() {
 //     audio file can be inspected directly.
 // Visible only in dev mode (?dev=1 or #dev or the footer toggle).
 // ─────────────────────────────────────────────────────────────
-function DevSignalPanel({ clientRef, diag, lastUserTranscript }) {
+function DevSignalPanel({ clientRef, diag, lastUserTranscript, lastDiscarded }) {
   const [status, setStatus] = useState(null);
   const handlePlay = useCallback(() => {
     const c = clientRef.current;
@@ -606,6 +624,12 @@ function DevSignalPanel({ clientRef, diag, lastUserTranscript }) {
         <div style={cell}>last upstream transcript</div>
         <div style={{ ...numCell, color: lastUserTranscript ? 'var(--fg)' : 'var(--fg-faint)' }}>
           {lastUserTranscript || '— (Whisper has not returned anything yet)'}
+        </div>
+        <div style={cell}>last discarded input</div>
+        <div style={{ ...numCell, color: lastDiscarded ? 'var(--warn)' : 'var(--fg-faint)' }}>
+          {lastDiscarded
+            ? `${lastDiscarded.at} · ${lastDiscarded.reason} · "${lastDiscarded.transcript}"`
+            : '— (no Whisper artifacts or stop commands seen)'}
         </div>
       </div>
       <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>

@@ -29,6 +29,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocket as UpstreamWS, type RawData } from 'ws';
 import type { WebSocket as ClientWS } from 'ws';
 
+import { isStopCommand, isWhisperArtifact } from './audio-artifacts.js';
 import type { JarvisEnv } from './env.js';
 import { log } from './logger.js';
 import { buildSystemPrompt, type PersistedUserContext } from './session.js';
@@ -267,6 +268,58 @@ export function runProxy(opts: ProxyOptions): void {
     }
     if (type === 'conversation.item.input_audio_transcription.completed') {
       const transcript = readString(evt, 'transcript');
+
+      // Bug-I SPOT enforcement (2026-06-01): the prior architecture had
+      // the client render every transcript as a user-turn bubble while
+      // the system-prompt directive told the model to IGNORE Whisper
+      // YouTube-corpus artifacts. That's two sources of truth ("user
+      // said X" vs. "user said nothing") and they diverged — the user
+      // saw "I'll see you next time" in the UI while the model replied
+      // "noticed it's a bit quiet" as if the user hadn't spoken. Fix:
+      // ONE filter at the wire. If the transcript is a Whisper artifact
+      // we (a) suppress the user-turn event so the UI never renders the
+      // fake bubble, (b) send response.cancel upstream so the model's
+      // in-flight reply (already triggered by server_vad on speech_stop)
+      // is halted, (c) emit a debug-only jarvis.input_discarded event
+      // the client can use for transparency (DevSignalPanel).
+      if (isWhisperArtifact(transcript)) {
+        log.info({
+          event: 'proxy.transcript_discarded_whisper_artifact',
+          transcript,
+          userId: userCtx.userId,
+        });
+        safeUpstreamSend({ type: 'response.cancel' });
+        safeClientSend({
+          type: 'jarvis.input_discarded',
+          reason: 'whisper_artifact',
+          transcript,
+        });
+        return;
+      }
+
+      // Bug-J (2026-06-01): stop commands. The user said something like
+      // "quiet now" / "shut up" / "stop talking". This IS a real user
+      // turn (it deserves a UI bubble — the user wants to know we heard
+      // them), but the model should NOT generate a follow-up reply. We
+      // forward the transcript event so the UI shows it, then cancel
+      // any in-flight response and tell the client not to expect one.
+      if (isStopCommand(transcript)) {
+        log.info({
+          event: 'proxy.stop_command_acknowledged',
+          transcript,
+          userId: userCtx.userId,
+        });
+        onTurn?.({ role: 'user', content: transcript });
+        safeClientSend(evt);
+        safeUpstreamSend({ type: 'response.cancel' });
+        safeClientSend({
+          type: 'jarvis.input_discarded',
+          reason: 'stop_command',
+          transcript,
+        });
+        return;
+      }
+
       if (transcript.length > 0) onTurn?.({ role: 'user', content: transcript });
       safeClientSend(evt);
       return;

@@ -273,21 +273,16 @@
         if (typeof this.listener.onMicGranted === 'function') {
           try { this.listener.onMicGranted(); } catch (_) { /* listener bug — ignore */ }
         }
-        // Bug-G belt (2026-06-01): request 48 kHz explicitly. Chromium
-        // honors this. Safari may honor it (16.4+) or silently fall
-        // back to the system rate (typically 44.1 kHz on macOS) — the
-        // worklet's phase-continuous resampler covers both cases. The
-        // 48 kHz path is preferred because it produces an exact 2:1
-        // downsample ratio (48000 / 24000 = 2.0), bypassing the
-        // interpolation entirely.
-        let micCtx;
-        try {
-          micCtx = new AudioContext({ latencyHint: 'interactive', sampleRate: TARGET_RATE * 2 });
-        } catch (_) {
-          // Safari < 16 throws on the sampleRate option — fall back.
-          micCtx = new AudioContext({ latencyHint: 'interactive' });
-        }
-        this.micCtx = micCtx;
+        // Bug-G belt removed 2026-06-01: forcing AudioContext sampleRate
+        // to 48 kHz produced "latched-high LevelMeter + Whisper hearing
+        // near-silence" on Safari/macOS — the OS reported the rate but
+        // the actual mic→source resample produced clipped audio.
+        // Letting Safari pick its own rate (44.1 kHz default on macOS)
+        // is fine because the worklet's phase-continuous resampler
+        // (Bug-G fix proper, in pcm-recorder.js) handles non-integer
+        // ratios cleanly without the chunk-boundary artifact that
+        // produced the original "aaaaaaaa" failure.
+        this.micCtx = new AudioContext({ latencyHint: 'interactive' });
         await this.micCtx.audioWorklet.addModule('./pcm-recorder.js');
         const src = this.micCtx.createMediaStreamSource(stream);
         this.micSource = src;
@@ -331,27 +326,16 @@
               void this._handleBargeIn();
             }
           }
-          // Bug-H gate (2026-06-01): while Jarvis is speaking, drop
-          // low-amplitude mic chunks. Reason: macOS / iOS / Windows
-          // hardware echoCancellation is imperfect — when Jarvis is
-          // playing through laptop speakers, the mic captures ~10-30 %
-          // of his voice back as ambient bleed, and the user has no
-          // control over the residual leak. The upstream server VAD
-          // then treats that bleed as user speech, opens a new turn,
-          // and Whisper transcribes Jarvis's own delayed voice (or the
-          // remaining un-cancelled harmonic content) as garbled vowels.
-          // Gate: while speaking, only forward chunks loud enough that
-          // they could plausibly be the user actually barging in
-          // (analyser RMS > 0.04 OR worklet RMS > 0.02). Below that, we
-          // skip the upstream append — we have NOT seen a real user
-          // barge-in, and we don't want server-side VAD picking up the
-          // bleed. We still keep the chunk in the local capture buffer
-          // for transparency (so DevSignalPanel WAV download is honest).
-          if (this.status === STATUS_SPEAKING
-              && rms < BARGE_IN_WORKLET_RMS_THRESHOLD
-              && analyserRms < BARGE_IN_ANALYSER_RMS_THRESHOLD) {
-            return;
-          }
+          // Bug-H gate removed 2026-06-01: the conservative speaker-
+          // bleed gate I added in 3ed1df2 was dropping legitimate user
+          // voice during normal listening (because rms / analyserRms
+          // were read across the wrong status branch and the gate's
+          // condition tied to `this.status === SPEAKING` had race
+          // conditions on the listening → speaking → listening flip).
+          // User reported "Jarvis can't hear me at all." Whisper now
+          // sees every mic chunk again. Bleed is handled at the SERVER
+          // level by the existing server_vad threshold (0.6) and the
+          // new Bug-I proxy-side Whisper-artifact filter, both safer.
           const base64 = arrayBufferToBase64(pcm);
           this._micBytesSent += base64.length;
           this._sendUpstream({ type: 'input_audio_buffer.append', audio: base64 });
@@ -399,6 +383,32 @@
       if (this.playerCtx) {
         try { await this.playerCtx.close(); } catch (_) {}
         this.playerCtx = null;
+      }
+    }
+
+    // ── Discarded input: proxy-detected Whisper artifact or stop command.
+    //    Same playback teardown shape as _handleBargeIn (the only path that
+    //    gives <100 ms of silence on Web Audio), but with no upstream
+    //    response.cancel — the proxy already sent that — and an explicit
+    //    listener hook so the UI can surface what was filtered (DevSignalPanel).
+    async _handleInputDiscarded(reason, transcript) {
+      if (this.suppressDeltas) return;
+      this.suppressDeltas = true;
+      try {
+        await this._teardownPlayback();
+        if (typeof this.listener.onInputDiscarded === 'function') {
+          this.listener.onInputDiscarded(reason, transcript);
+        }
+        try {
+          await this._setupPlayback();
+        } catch (cause) {
+          if (typeof this.listener.onError === 'function') {
+            this.listener.onError('Playback reset failed', (cause && cause.message) || String(cause));
+          }
+        }
+        this._setStatus(STATUS_LISTENING);
+      } finally {
+        this.suppressDeltas = false;
       }
     }
 
@@ -508,6 +518,20 @@
           if (typeof this.listener.onError === 'function') {
             this.listener.onError('Upstream closed', `code=${evt.code} reason=${evt.reason || ''}`);
           }
+          return;
+
+        case 'jarvis.input_discarded':
+          // Bug-I/J (2026-06-01): the proxy detected the user's last
+          // utterance was either a Whisper near-silence artifact (so
+          // the user did NOT really speak — don't surface a fake user
+          // bubble) or a stop command (the user DID speak, and the
+          // transcript is already on the way as a normal user turn,
+          // but we must NOT let the model's auto-triggered reply play
+          // out). Either way we hard-kill any in-flight Jarvis audio
+          // and flip back to listening so the next real utterance
+          // starts cleanly. The reason field is logged for the dev
+          // panel.
+          void this._handleInputDiscarded(evt.reason || 'unknown', evt.transcript || '');
           return;
 
         case 'jarvis.error':
