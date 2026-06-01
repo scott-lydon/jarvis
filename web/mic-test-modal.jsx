@@ -236,27 +236,13 @@ function MicTestModal({ clientRef, onConfirm, onDismiss }) {
 
           {phase === PHASE_INTRO && (
             <>
-              <div>
-                Two-step check before we start a real Jarvis session.
-                Step 1 records {RECORD_SECONDS} seconds through your mic
-                and lets you play it back so you can hear EXACTLY what
-                Jarvis would hear. Step 2 sends the same recording to
-                OpenAI's HTTP Whisper endpoint so you can see what
-                Whisper transcribes from it — independent of the live
-                Realtime pipeline.
-              </div>
-              <div style={subdued}>
-                This isolates "is my mic broken?" from "is Whisper
-                misunderstanding me?" — each gets a separate, replayable
-                answer. The check is debug-only and will be removed once
-                the audio pipeline is verified.
-              </div>
+              <div>Let's test your mic.</div>
               <div style={ctaRow}>
                 <button type="button" style={btnPrimary} onClick={handleStartRecording}>
-                  Start mic test ({RECORD_SECONDS} s)
+                  Start ({RECORD_SECONDS} s)
                 </button>
                 <button type="button" style={btnSecondary} onClick={() => { setMicTestSessionPassed(); onConfirm(); }}>
-                  Skip and start session
+                  Skip
                 </button>
               </div>
             </>

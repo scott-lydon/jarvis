@@ -255,11 +255,39 @@ function serveStatic(root: string, urlPath: string, res: ServerResponse): void {
     return;
   }
   const mime = STATIC_MIME[extname(abs).toLowerCase()] ?? 'application/octet-stream';
+  // Bug-L (2026-06-01): the previous cache policy was
+  // `max-age=31536000, immutable` for every non-index.html file. That
+  // is only correct when filenames are content-hashed (e.g.
+  // `jarvis-client-a3f9c.js`) so a new build produces a NEW URL the
+  // browser cannot have cached. Our bundle ships PLAIN names
+  // (jarvis-client.js, mic-test-modal.jsx, etc.), so the immutable
+  // policy stuck users on whatever version they first loaded — Safari
+  // kept serving a pre-startMicTestRecording jarvis-client.js even
+  // after Render redeployed, producing the 'startMicTestRecording is
+  // not a function' error the user hit. Fix: split policy by file
+  // type.
+  //   - index.html       → no-store (always fetched fresh, so script
+  //                         tags inside can pick up new asset
+  //                         versions).
+  //   - .js / .jsx / .css → no-cache (browser MAY keep a copy but
+  //                         MUST revalidate with the origin before
+  //                         using it; Node sets Last-Modified
+  //                         automatically and the browser sends
+  //                         If-Modified-Since, so this is cheap).
+  //   - fonts, images,    → long-lived immutable (those genuinely
+  //     icons, .map         don't change between bundle versions).
+  let cacheControl;
+  if (abs.endsWith('index.html')) {
+    cacheControl = 'no-store';
+  } else if (/\.(jsx?|mjs|css)$/i.test(abs)) {
+    cacheControl = 'no-cache';
+  } else {
+    cacheControl = 'public, max-age=31536000, immutable';
+  }
   res.writeHead(200, {
     'Content-Type': mime,
-    // index.html should NEVER cache (we want clients to pick up new builds);
-    // hashed assets under /assets/ may cache aggressively.
-    'Cache-Control': abs.endsWith('index.html') ? 'no-store' : 'public, max-age=31536000, immutable',
+    'Cache-Control': cacheControl,
+    'Last-Modified': statSync(abs).mtime.toUTCString(),
   });
   createReadStream(abs).pipe(res);
 }
