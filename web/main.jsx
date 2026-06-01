@@ -79,6 +79,29 @@ function App() {
   // Dev signal-flow telemetry (drives the DevSignalPanel below).
   const [micDiag, setMicDiag]   = useState(null);
   const [lastUserTranscript, setLastUserTranscript] = useState('');
+  // Bug-F fix (2026-06-01): make the mic-intro banner state-derived
+  // instead of imperative. The previous "push it into banners on mount,
+  // pop it on onMicGranted" model had three separate dismissal triggers
+  // (Permissions API initial probe, Permissions API change handler,
+  // onMicGranted from getUserMedia.then) and the user still saw the
+  // banner persist on Safari/macOS. Root cause: the imperative model
+  // is fragile — any unsubscribed listener bug, any closure-staleness,
+  // any browser-permission-quirk-throwing-silently breaks dismissal,
+  // and we already saw the user with an ACTIVE 'Listening' session
+  // sitting next to a "Microphone permission required" banner — a
+  // logical impossibility.
+  //
+  // New model: micPermissionState is the single source of truth.
+  //   'unknown'  → we haven't probed yet; show the banner conservatively
+  //   'prompt'   → permission has not been granted or denied; show banner
+  //   'granted'  → mic is allowed; never show banner
+  //   'denied'   → show a different "revoked / re-enable in settings" banner
+  // The render layer reads (state, micPermissionState) and renders the
+  // appropriate banner. Status === 'listening|thinking|speaking' is
+  // ALSO treated as proof of grant — by definition the session can't
+  // be live without a working mic — so even if the Permissions API
+  // never updates, the banner stays gone after the session starts.
+  const [micPermissionState, setMicPermissionState] = useState('unknown');
   const logRef = useRef(null);
   const clientRef = useRef(null);
   // Track in-flight tool calls so we can resolve a pending tile when the
@@ -104,36 +127,34 @@ function App() {
     }, 400);
   }, []);
 
-  // Bug-B fix (2026-05-31, simplified final): one trigger — the moment
-  // getUserMedia resolves — dismisses the mic-intro banner. No WebSocket
-  // round-trip, no status-machine inference. The Permissions API change
-  // path stays ONLY to detect REVOCATION: if the browser ever flips the
-  // permission back to 'denied' after a successful grant, we surface a
-  // new banner with how-to-re-enable instructions because the user has
-  // to do that from the browser's site-settings UI now.
+  // Bug-F fix (2026-06-01): Permissions API drives micPermissionState,
+  // which the render layer uses to decide whether to show the mic-intro
+  // banner. Three-layer detection:
+  //
+  //   Layer 1 — Permissions API initial probe (Chromium, Safari 16+).
+  //     Resolves with one of 'granted' / 'denied' / 'prompt'. On Safari
+  //     pre-16 / Firefox older builds this throws (TypeError on the
+  //     'microphone' name) and we fall through to Layer 2/3.
+  //   Layer 2 — Permissions API change listener. Drives revocation
+  //     detection: if the user revokes mid-session we surface the
+  //     re-enable instructions banner. Also re-confirms a granted flip
+  //     after the OS-level prompt resolves.
+  //   Layer 3 — onMicGranted callback fired by the JarvisClient the
+  //     instant getUserMedia.then() resolves. This is the ground-truth
+  //     signal that works on EVERY browser. The Permissions API is a
+  //     defense-in-depth nice-to-have on top.
+  //
+  // On every layer, micPermissionState is set explicitly so the render
+  // gating below stays a single state machine.
   useEffect(() => {
     if (typeof navigator === 'undefined' || !navigator.permissions || !navigator.permissions.query) return;
     let cancelled = false;
     let statusRef = null;
     const onChange = () => {
-      if (cancelled) return;
-      if (!statusRef) return;
-      if (statusRef.state === 'denied') {
-        // The user must change this from the browser's site settings;
-        // we cannot re-trigger the OS-level prompt programmatically.
-        setBanners((b) => {
-          if (b.some((x) => x.id === 'mic_revoked')) return b;
-          return b.concat([{
-            id: 'mic_revoked', kind: 'err',
-            title: 'Microphone access was revoked',
-            body: 'Chrome → site settings (the lock icon in the URL bar) → Microphone → Allow. Then reload this page.',
-            dismissible: true,
-          }]);
-        });
-      } else if (statusRef.state === 'granted') {
-        // Belt-and-suspenders: also clear the intro banner here if for
-        // some reason onMicGranted didn't fire.
-        setBanners((b) => b.filter((x) => x.id !== 'mic_intro' && x.id !== 'mic_revoked'));
+      if (cancelled || !statusRef) return;
+      const next = statusRef.state;
+      if (next === 'granted' || next === 'denied' || next === 'prompt') {
+        setMicPermissionState(next);
       }
     };
     navigator.permissions.query({ name: 'microphone' }).then((status) => {
@@ -141,7 +162,11 @@ function App() {
       statusRef = status;
       onChange();
       try { status.addEventListener('change', onChange); } catch (_) { status.onchange = onChange; }
-    }).catch(() => {/* Permissions API not supported — onMicGranted still works */});
+    }).catch(() => {
+      // Permissions API not supported for 'microphone' (Safari < 16,
+      // older Firefox) — leave micPermissionState as 'unknown' and
+      // rely on onMicGranted + state-derived suppression.
+    });
     return () => {
       cancelled = true;
       if (statusRef) {
@@ -150,18 +175,30 @@ function App() {
     };
   }, []);
 
+  // Bug-F fix (2026-06-01): an active session is itself proof of mic
+  // grant. If state transitions to listening/thinking/speaking, the
+  // browser has given us a working mic — clamp micPermissionState to
+  // 'granted' so the render layer cannot show "permission required"
+  // next to a live "Listening" status bar.
+  useEffect(() => {
+    if (state === 'listening' || state === 'thinking' || state === 'speaking') {
+      setMicPermissionState((prev) => (prev === 'granted' ? prev : 'granted'));
+    }
+  }, [state]);
+
   // ── Boot the real client ──
   useEffect(() => {
     const client = new window.JarvisClient({
       onState: (s) => setState(s),
       onMicLevels: (lvls) => setMicLevels(lvls),
       onMicDiag: (d) => setMicDiag(d),
-      // Bug-B fix (final): the ONLY local trigger to dismiss the
-      // mic-intro banner. Fires the instant getUserMedia resolves —
-      // i.e. the instant the user taps Allow in the OS-level prompt.
-      // No WebSocket round-trip required.
+      // Bug-F fix (2026-06-01): ground-truth grant signal. Fires the
+      // instant navigator.mediaDevices.getUserMedia().then() resolves
+      // — i.e. the instant the user taps Allow in the OS-level prompt.
+      // Drives the state-derived banner gating; works on every browser
+      // even when the Permissions API is unsupported for 'microphone'.
       onMicGranted: () => {
-        setBanners((b) => b.filter((x) => x.id !== 'mic_intro'));
+        setMicPermissionState('granted');
       },
       onSessionReady: (uid) => setSessionId(uid.slice(0, 6)),
       onUserTurn: (text) => {
@@ -244,8 +281,9 @@ function App() {
         }]));
       },
       onMicPermissionDenied: (detail) => {
+        setMicPermissionState('denied');
         setBanners((b) => b.concat([{
-          id: `mic_${Date.now()}`,
+          id: `mic_denied_${Date.now()}`,
           kind: 'err',
           title: 'Microphone permission denied',
           body: detail,
@@ -313,26 +351,66 @@ function App() {
     setBanners(b => b.filter(x => x.id !== id));
   }, []);
 
-  // First-time mic-permission CTA. Visible by default until the user taps
-  // the mic; the client will replace it with a real "denied" banner if the
-  // user denies. Per UX review 2026-05-31: non-dismissible + CTA pill.
-  useEffect(() => {
-    setBanners([{
-      id: 'mic_intro', kind: 'warn',
-      title: 'Microphone permission required',
-      body: 'Jarvis can\'t hear you until you grant access.',
-      dismissible: false,
-      cta: {
-        label: 'Grant microphone access',
-        onClick: () => handleMicTap(),
-      },
-    }]);
-  }, [handleMicTap]);
+  // Bug-F fix (2026-06-01): mic-intro banner is now state-derived —
+  // see micIntroBanner / micRevokedBanner memoized below. We no longer
+  // push it into the imperative `banners` array on mount; the render
+  // layer composes it from (state, micPermissionState) so a live
+  // session can never coexist with a "permission required" warning.
 
   const turnsCount = useMemo(
     () => items.filter(i => i.kind === 'turn').length,
     [items]
   );
+
+  // Bug-F fix (2026-06-01): derived mic banner. Show "permission
+  // required" only when:
+  //   - the session is idle (no live capture confirming grant), AND
+  //   - permission is not 'granted' (either 'unknown', 'prompt', or
+  //     the explicit denied state which uses its own banner below).
+  // When the user taps "Grant microphone access" we call handleMicTap
+  // which triggers getUserMedia — the OS prompt drives micPermissionState
+  // to 'granted' (or the denied callback above), so the banner naturally
+  // disappears as soon as the answer is in.
+  const micIntroBanner = useMemo(() => {
+    if (state !== 'idle') return null;
+    if (micPermissionState === 'granted') return null;
+    if (micPermissionState === 'denied') return null; // handled by micRevokedBanner
+    return {
+      id: 'mic_intro', kind: 'warn',
+      title: 'Microphone permission required',
+      body: 'Jarvis can\'t hear you until you grant access.',
+      dismissible: false,
+      cta: { label: 'Grant microphone access', onClick: handleMicTap },
+    };
+  }, [state, micPermissionState, handleMicTap]);
+
+  // Bug-F fix (2026-06-01): derived revocation banner. Same source of
+  // truth (micPermissionState) — surfaces re-enable instructions when
+  // the browser flips to 'denied' after a prior grant. There is no
+  // programmatic way to re-prompt; the user must change it in site
+  // settings, so the body text walks them there.
+  const micRevokedBanner = useMemo(() => {
+    if (micPermissionState !== 'denied') return null;
+    return {
+      id: 'mic_revoked', kind: 'err',
+      title: 'Microphone access was revoked',
+      body: 'Safari / Chrome → site settings (the lock icon in the URL bar) → Microphone → Allow. Then reload this page.',
+      // Non-dismissible: the only fix is to flip the permission back,
+      // and the state machine will clear the banner automatically when
+      // the Permissions API reports 'granted' (or onMicGranted fires
+      // after the user retries). A dismiss button here would deceive
+      // the user into thinking they had cleared it.
+      dismissible: false,
+    };
+  }, [micPermissionState]);
+
+  const allBanners = useMemo(() => {
+    const out = [];
+    if (micIntroBanner) out.push(micIntroBanner);
+    if (micRevokedBanner) out.push(micRevokedBanner);
+    for (const b of banners) out.push(b);
+    return out;
+  }, [micIntroBanner, micRevokedBanner, banners]);
 
   return (
     <>
@@ -358,7 +436,7 @@ function App() {
         flex: 1, minHeight: 0, overflowY: 'auto',
         paddingBottom: 8,
       }}>
-        {banners.map(b => (
+        {allBanners.map(b => (
           <ErrorBanner key={b.id} banner={b} onDismiss={dismissBanner}/>
         ))}
 

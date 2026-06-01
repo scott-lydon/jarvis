@@ -273,9 +273,21 @@
         if (typeof this.listener.onMicGranted === 'function') {
           try { this.listener.onMicGranted(); } catch (_) { /* listener bug — ignore */ }
         }
-        // No forced sampleRate — the AudioContext defaults to the device
-        // rate, the worklet sees `sampleRate` and downsamples to 24 kHz.
-        this.micCtx = new AudioContext({ latencyHint: 'interactive' });
+        // Bug-G belt (2026-06-01): request 48 kHz explicitly. Chromium
+        // honors this. Safari may honor it (16.4+) or silently fall
+        // back to the system rate (typically 44.1 kHz on macOS) — the
+        // worklet's phase-continuous resampler covers both cases. The
+        // 48 kHz path is preferred because it produces an exact 2:1
+        // downsample ratio (48000 / 24000 = 2.0), bypassing the
+        // interpolation entirely.
+        let micCtx;
+        try {
+          micCtx = new AudioContext({ latencyHint: 'interactive', sampleRate: TARGET_RATE * 2 });
+        } catch (_) {
+          // Safari < 16 throws on the sampleRate option — fall back.
+          micCtx = new AudioContext({ latencyHint: 'interactive' });
+        }
+        this.micCtx = micCtx;
         await this.micCtx.audioWorklet.addModule('./pcm-recorder.js');
         const src = this.micCtx.createMediaStreamSource(stream);
         this.micSource = src;
@@ -312,11 +324,33 @@
           // RMS OR the analyser-time-domain RMS (raw mic, no quantize),
           // so a noise-suppressed worklet output doesn't HIDE a real
           // barge-in. The mic analyser path is checked here too.
+          let analyserRms = 0;
           if (this.status === STATUS_SPEAKING) {
-            const analyserRms = this._readMicAnalyserRMS();
+            analyserRms = this._readMicAnalyserRMS();
             if (rms > BARGE_IN_WORKLET_RMS_THRESHOLD || analyserRms > BARGE_IN_ANALYSER_RMS_THRESHOLD) {
               void this._handleBargeIn();
             }
+          }
+          // Bug-H gate (2026-06-01): while Jarvis is speaking, drop
+          // low-amplitude mic chunks. Reason: macOS / iOS / Windows
+          // hardware echoCancellation is imperfect — when Jarvis is
+          // playing through laptop speakers, the mic captures ~10-30 %
+          // of his voice back as ambient bleed, and the user has no
+          // control over the residual leak. The upstream server VAD
+          // then treats that bleed as user speech, opens a new turn,
+          // and Whisper transcribes Jarvis's own delayed voice (or the
+          // remaining un-cancelled harmonic content) as garbled vowels.
+          // Gate: while speaking, only forward chunks loud enough that
+          // they could plausibly be the user actually barging in
+          // (analyser RMS > 0.04 OR worklet RMS > 0.02). Below that, we
+          // skip the upstream append — we have NOT seen a real user
+          // barge-in, and we don't want server-side VAD picking up the
+          // bleed. We still keep the chunk in the local capture buffer
+          // for transparency (so DevSignalPanel WAV download is honest).
+          if (this.status === STATUS_SPEAKING
+              && rms < BARGE_IN_WORKLET_RMS_THRESHOLD
+              && analyserRms < BARGE_IN_ANALYSER_RMS_THRESHOLD) {
+            return;
           }
           const base64 = arrayBufferToBase64(pcm);
           this._micBytesSent += base64.length;
