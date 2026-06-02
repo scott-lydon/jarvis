@@ -298,6 +298,69 @@ export function runProxy(opts: ProxyOptions): void {
       }
       return;
     }
+    if (type === 'jarvis.silenced') {
+      // Bug-S (2026-06-02) — the BROWSER detected silence. The client
+      // already torn down playback and flipped isSilenced=true locally
+      // (so even in-transit audio.delta is dropped on the floor); our
+      // job here is to (a) cancel any in-flight upstream response so
+      // we stop burning tokens, and (b) flip the session's
+      // create_response to false so OpenAI's server VAD does not auto-
+      // generate a new response for the silence-command turn itself.
+      log.info({
+        event: 'proxy.client_silenced',
+        transcript: typeof evt['transcript'] === 'string' ? evt['transcript'] : '',
+        userId: userCtx.userId,
+      });
+      silenced = true;
+      if (currentResponseId !== null) {
+        safeUpstreamSend({ type: 'response.cancel', response_id: currentResponseId });
+      }
+      safeUpstreamSend({
+        type: 'session.update',
+        session: {
+          audio: {
+            input: {
+              turn_detection: {
+                type: 'server_vad',
+                threshold: 0.75,
+                prefix_padding_ms: 600,
+                silence_duration_ms: 1500,
+                create_response: false,
+              },
+            },
+          },
+        },
+      });
+      return;
+    }
+    if (type === 'jarvis.unsilenced') {
+      // Bug-S (2026-06-02) — browser detected the resume phrase. Flip
+      // create_response back to true so subsequent VAD turns trigger
+      // normal responses again.
+      log.info({
+        event: 'proxy.client_unsilenced',
+        transcript: typeof evt['transcript'] === 'string' ? evt['transcript'] : '',
+        userId: userCtx.userId,
+      });
+      silenced = false;
+      safeUpstreamSend({
+        type: 'session.update',
+        session: {
+          audio: {
+            input: {
+              turn_detection: {
+                type: 'server_vad',
+                threshold: 0.75,
+                prefix_padding_ms: 600,
+                silence_duration_ms: 1500,
+                create_response: true,
+              },
+            },
+          },
+        },
+      });
+      return;
+    }
     if (type === 'jarvis.ping') {
       safeClientSend({ type: 'jarvis.pong', ts: new Date().toISOString() });
       return;

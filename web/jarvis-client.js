@@ -48,6 +48,76 @@
   const CAPTURE_BUFFER_SECONDS = 30;
   const CAPTURE_BUFFER_SAMPLES = TARGET_RATE * CAPTURE_BUFFER_SECONDS; // 720_000 Int16 @ 24 kHz
 
+  // ── Bug-S (2026-06-02): browser-side silenced detection ────────
+  //
+  // Per user's exact spec: "A simple fucking flag. perhaps a flag
+  // 'isSilenced' on the browser, which prevents all outgoing
+  // communication from Jarvis." The prior architecture relied on the
+  // proxy to detect first, then notify the client; on the live deploy
+  // the user said "quiet" and the proxy missed it (Whisper-with-
+  // context phrasing? VAD missed it under playback bleed? something
+  // else?), so Jarvis kept talking. This file now owns the truth.
+  //
+  // The phrase lists are mirrored from src/audio-artifacts.ts. We
+  // duplicate rather than fetching from the server because (a) the
+  // check must run synchronously inside the WebSocket event handler
+  // with zero network latency, and (b) the lists are small enough
+  // that the duplication cost is < 1 KB. If the server SPOT lists
+  // ever change, both copies must update together — there is a
+  // matching comment in src/audio-artifacts.ts.
+  const SILENCE_PHRASES_CLIENT = [
+    'quiet', 'quiet now', 'be quiet', 'shut up', 'shush',
+    'stop', 'stop talking', 'stop please', 'wait', 'hold on',
+    'one second', 'one moment', 'hold up', 'pause', 'silence',
+    'stop it', 'stop now', 'stop please now', 'no more', 'enough',
+    "that's enough", 'thats enough', 'ok enough', 'okay enough',
+    'alright stop', 'all right stop', 'shut it', 'be silent',
+    'go silent', 'silent now', 'silent please', 'not now',
+    'hold that thought', 'hold the phone', 'give me a second',
+    'give me a moment', 'just a sec', 'just a second', 'just a moment',
+    'quiet please', 'please be quiet', 'quiet jarvis', 'jarvis quiet',
+    'jarvis be quiet', 'be quiet jarvis', 'jarvis stop', 'stop jarvis',
+    'jarvis shut up', 'shut up jarvis', 'shush jarvis', 'jarvis shush',
+  ];
+  const RESUME_PHRASES_CLIENT = [
+    'speak', 'speak now', 'speak up', 'you can speak', 'you may speak',
+    'talk', 'talk to me', 'resume', 'continue', 'go ahead', 'proceed',
+    'unsilence', 'unmute', 'jarvis speak', 'okay speak',
+  ];
+  const SHORT_PHRASE_SILENCE_KEYWORDS_CLIENT = new Set([
+    'quiet', 'silence', 'silent', 'shush', 'hush', 'enough',
+    'pause', 'halt', 'mute',
+  ]);
+  function normalizeForSilenceCheck(text) {
+    if (typeof text !== 'string') return '';
+    return text.trim().toLowerCase()
+      .replace(/[.!?,;:'"`-]+/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+  function isSilencePhraseClient(text) {
+    const norm = normalizeForSilenceCheck(text);
+    if (norm.length === 0) return false;
+    for (let i = 0; i < SILENCE_PHRASES_CLIENT.length; i++) {
+      if (norm === normalizeForSilenceCheck(SILENCE_PHRASES_CLIENT[i])) return true;
+    }
+    const words = norm.split(' ').filter(function (w) { return w.length > 0; });
+    if (words.length > 0 && words.length <= 3) {
+      for (let i = 0; i < words.length; i++) {
+        if (SHORT_PHRASE_SILENCE_KEYWORDS_CLIENT.has(words[i])) return true;
+      }
+    }
+    return false;
+  }
+  function isResumePhraseClient(text) {
+    const norm = normalizeForSilenceCheck(text);
+    if (norm.length === 0) return false;
+    for (let i = 0; i < RESUME_PHRASES_CLIENT.length; i++) {
+      if (norm === normalizeForSilenceCheck(RESUME_PHRASES_CLIENT[i])) return true;
+    }
+    return false;
+  }
+
   function arrayBufferToBase64(buf) {
     const bytes = new Uint8Array(buf);
     let bin = '';
@@ -154,11 +224,16 @@
       // Set true on barge-in to ignore audio deltas that may still be in
       // flight while we tear down + rebuild the playback context.
       this.suppressDeltas = false;
-      // Bug-O (2026-06-01) silenced-mode mirror state. Authoritative
-      // copy lives on the proxy (so it can flip create_response on
-      // session.update); this local copy lets the client short-circuit
-      // any inbound audio.delta the proxy lets slip during the race.
-      this.silenced = false;
+      // Bug-S (2026-06-02) — THE flag. Single browser-side source of
+      // truth for "Jarvis is silenced." When true, every code path
+      // that would produce Jarvis output to the user — audio playback,
+      // assistant-turn bubbles, tool-result tiles, filler text — is
+      // short-circuited before reaching the React layer. Detection
+      // happens in this file (see the transcription.completed branch)
+      // and also via the proxy's jarvis.silenced event as a backup.
+      // The proxy is notified via jarvis.silenced upstream so the
+      // model stops generating responses we'd just discard.
+      this.isSilenced = false;
 
       this._tickLevels();
     }
@@ -519,6 +594,10 @@
           return;
 
         case 'jarvis.filler':
+          // Bug-S (2026-06-02) — isSilenced gate. Filler is Jarvis
+          // output ("One moment, looking that up…"). Block when
+          // silenced.
+          if (this.isSilenced) return;
           this._setStatus(STATUS_THINKING);
           if (typeof this.listener.onFiller === 'function') {
             this.listener.onFiller(evt.text || '', evt.tool || 'unknown');
@@ -526,6 +605,10 @@
           return;
 
         case 'jarvis.tool_result':
+          // Bug-S — tool result tiles are Jarvis output too. Block
+          // when silenced; the tool may have run server-side but
+          // surfacing the result would re-engage Jarvis.
+          if (this.isSilenced) return;
           if (typeof this.listener.onToolResult === 'function') {
             this.listener.onToolResult(
               evt.tool || 'unknown',
@@ -557,12 +640,11 @@
           return;
 
         case 'jarvis.silenced':
-          // Bug-O (2026-06-01): user uttered a silence phrase. Hard-
-          // teardown playback so the audio stops mid-sentence (under
-          // 100 ms), notify the React layer so it can render the
-          // yellow banner, and remember we are in silenced mode so
-          // future audio_delta events get suppressed locally too.
-          this.silenced = true;
+          // Bug-O/S — proxy-detected silence (backup to the browser-
+          // side check above). Idempotent: if the client already
+          // flipped isSilenced=true, this is a no-op.
+          if (this.isSilenced) return;
+          this.isSilenced = true;
           void this._handleInputDiscarded('silenced', evt.transcript || '');
           if (typeof this.listener.onSilenced === 'function') {
             this.listener.onSilenced(evt.transcript || '');
@@ -570,10 +652,9 @@
           return;
 
         case 'jarvis.unsilenced':
-          // Bug-O: user said a resume phrase ("speak", "continue",
-          // …). Drop the silenced flag and let the React layer hide
-          // the banner.
-          this.silenced = false;
+          // Bug-O/S — proxy-detected resume. Idempotent.
+          if (!this.isSilenced) return;
+          this.isSilenced = false;
           if (typeof this.listener.onUnsilenced === 'function') {
             this.listener.onUnsilenced(evt.transcript || '');
           }
@@ -590,30 +671,80 @@
           // would re-fill the queue we just killed. Status flip to speaking
           // happens AFTER the suppress check so the UI doesn't flicker.
           if (this.suppressDeltas) return;
-          // Bug-O (2026-06-01): belt for silenced mode. If the user
-          // told Jarvis to be quiet, no audio plays no matter what
-          // raced through.
-          if (this.silenced) return;
+          // Bug-S (2026-06-02) — the gate. While silenced, audio
+          // from Jarvis is dropped on the floor.
+          if (this.isSilenced) return;
           this._setStatus(STATUS_SPEAKING);
           this._enqueuePcm(evt.delta);
           return;
 
         case 'response.audio.done':
+          // Bug-S — even the done event we suppress; let the status
+          // stay where it was (LISTENING or THINKING). Otherwise a
+          // race could un-silence the UI briefly.
+          if (this.isSilenced) return;
           this._setStatus(STATUS_LISTENING);
           return;
 
         case 'response.audio_transcript.done':
+          // Bug-S — assistant text bubbles are Jarvis output. Block
+          // when silenced. The user reported "Understood, I'll stay
+          // quiet now." appearing as text even when audio was meant
+          // to be cut. This branch is exactly the path that produced
+          // that bubble.
+          if (this.isSilenced) return;
           if (typeof this.listener.onAssistantTurn === 'function') {
             this.listener.onAssistantTurn(evt.transcript || '');
           }
           return;
 
-        case 'conversation.item.input_audio_transcription.completed':
-          if (typeof this.listener.onUserTurn === 'function') {
-            const text = evt.transcript || '';
-            if (text.length > 0) this.listener.onUserTurn(text);
+        case 'conversation.item.input_audio_transcription.completed': {
+          const text = evt.transcript || '';
+          // Bug-S (2026-06-02) — visibility into what Whisper actually
+          // returned. The user reported saying "quiet" and getting
+          // no silenced banner; without this log we cannot tell
+          // whether the transcript event arrived at all and whether
+          // its content matched our phrase list. Cheap, always on.
+          // eslint-disable-next-line no-console
+          console.log('[Jarvis] transcript received: ' + JSON.stringify(text));
+
+          // Bug-S — BROWSER-SIDE detection. Runs synchronously the
+          // moment the transcription event arrives. Does NOT depend
+          // on the proxy's parallel detection (which has missed in
+          // testing). If we're in silenced mode, only a resume
+          // phrase can take us out; if we're not silenced, any
+          // recognized silence phrase puts us there.
+          if (this.isSilenced) {
+            if (isResumePhraseClient(text)) {
+              // eslint-disable-next-line no-console
+              console.log('[Jarvis] RESUME phrase matched: ' + JSON.stringify(text));
+              this.isSilenced = false;
+              this._sendUpstream({ type: 'jarvis.unsilenced', transcript: text });
+              if (typeof this.listener.onUnsilenced === 'function') {
+                this.listener.onUnsilenced(text);
+              }
+            }
+          } else {
+            if (isSilencePhraseClient(text)) {
+              // eslint-disable-next-line no-console
+              console.log('[Jarvis] SILENCE phrase matched: ' + JSON.stringify(text));
+              this.isSilenced = true;
+              this._sendUpstream({ type: 'jarvis.silenced', transcript: text });
+              void this._handleInputDiscarded('silenced', text);
+              if (typeof this.listener.onSilenced === 'function') {
+                this.listener.onSilenced(text);
+              }
+            }
+          }
+
+          // Always forward the user-turn bubble — the user said
+          // something, the UI should show it regardless of whether
+          // it triggered silence.
+          if (text.length > 0 && typeof this.listener.onUserTurn === 'function') {
+            this.listener.onUserTurn(text);
           }
           return;
+        }
 
         case 'input_audio_buffer.speech_started':
           this._setStatus(STATUS_LISTENING);
