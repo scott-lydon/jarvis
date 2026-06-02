@@ -14,10 +14,14 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  RESUME_PHRASES,
+  SILENCE_PHRASES,
   STOP_COMMANDS,
   WHISPER_ARTIFACTS,
   formatArtifactListForPrompt,
   formatStopCommandsForPrompt,
+  isResumePhrase,
+  isSilencePhrase,
   isStopCommand,
   isWhisperArtifact,
 } from '../../src/audio-artifacts.js';
@@ -94,6 +98,64 @@ describe('isStopCommand (Bug-J)', () => {
     expect(isStopCommand("wait that's not what I meant")).toBe(false);
     expect(isStopCommand('stop the car')).toBe(false);
     expect(isStopCommand("hold on a second I'm thinking")).toBe(false);
+  });
+});
+
+describe('isSilencePhrase (Bug-O)', () => {
+  it('matches every SILENCE_PHRASES entry exactly + punctuation tolerated', () => {
+    for (const phrase of SILENCE_PHRASES) {
+      expect(isSilencePhrase(phrase), `bare: ${phrase}`).toBe(true);
+      expect(isSilencePhrase(`${phrase}.`), `dot: ${phrase}.`).toBe(true);
+    }
+  });
+
+  it('matches the literal phrases the user tested', () => {
+    expect(isSilencePhrase('quiet')).toBe(true);
+    expect(isSilencePhrase('Silence')).toBe(true);
+    expect(isSilencePhrase('Be quiet.')).toBe(true);
+    expect(isSilencePhrase('enough')).toBe(true);
+  });
+
+  it('does NOT match conversational uses of stop words', () => {
+    expect(isSilencePhrase("wait that's not what I meant")).toBe(false);
+    expect(isSilencePhrase('stop the car')).toBe(false);
+    expect(isSilencePhrase('hold on a second I am thinking')).toBe(false);
+  });
+
+  it('superset of STOP_COMMANDS', () => {
+    for (const phrase of STOP_COMMANDS) {
+      expect(isSilencePhrase(phrase), `STOP_COMMAND ${phrase} not in SILENCE_PHRASES`).toBe(true);
+    }
+  });
+});
+
+describe('isResumePhrase (Bug-O)', () => {
+  it('matches every RESUME_PHRASES entry exactly + punctuation tolerated', () => {
+    for (const phrase of RESUME_PHRASES) {
+      expect(isResumePhrase(phrase), `bare: ${phrase}`).toBe(true);
+      expect(isResumePhrase(`${phrase}.`), `dot: ${phrase}.`).toBe(true);
+    }
+  });
+
+  it('matches the literal phrase the banner instructs the user to say', () => {
+    // Banner copy is "Say the word 'speak'". This must match.
+    expect(isResumePhrase('speak')).toBe(true);
+    expect(isResumePhrase('Speak.')).toBe(true);
+  });
+
+  it('does NOT match a casual yes/okay (false-resume guard)', () => {
+    // Conservative bar — the user does NOT want a stray "okay" to
+    // resume Jarvis mid-conversation with someone else in the room.
+    expect(isResumePhrase('okay')).toBe(false);
+    expect(isResumePhrase('yes')).toBe(false);
+    expect(isResumePhrase('alright')).toBe(false);
+  });
+
+  it('does NOT match a phrase containing "speak" as a substring', () => {
+    // Only exact-equality matches. "I will speak now" is a real
+    // utterance, not a resume command.
+    expect(isResumePhrase('I will speak now')).toBe(false);
+    expect(isResumePhrase('speak softly please')).toBe(false);
   });
 });
 

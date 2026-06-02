@@ -76,6 +76,104 @@ export const STOP_COMMANDS: readonly string[] = [
   "silence",
 ];
 
+/**
+ * Bug-O (2026-06-01) — silenced-mode entry phrases.
+ *
+ * Superset of STOP_COMMANDS that also includes turn-ending phrases the
+ * user explicitly wants to put Jarvis into silenced mode. The user's
+ * spec: "When a deterministic browser layer detects one of those
+ * specific words, then Jarvis goes into silenced mode. Where it stops
+ * making sound mid sentence (instantly), and then presents a text with
+ * a different visual ui."
+ *
+ * In silenced mode the proxy:
+ *   - Cancels any in-flight response (audio stops mid-sentence).
+ *   - Sends session.update with turn_detection.create_response=false
+ *     so the model does not auto-respond to subsequent VAD-detected
+ *     speech (transcripts still flow so we can detect the resume
+ *     phrase).
+ *   - Emits jarvis.silenced so the client renders the yellow banner.
+ *
+ * Wider net than STOP_COMMANDS so the user doesn't have to think
+ * about which phrasing they used; isStopCommand stays the narrower
+ * filter used for "cancel this one response" without entering full
+ * silenced mode.
+ */
+export const SILENCE_PHRASES: readonly string[] = [
+  ...STOP_COMMANDS,
+  "stop it",
+  "stop now",
+  "stop please now",
+  "no more",
+  "enough",
+  "that's enough",
+  "thats enough",
+  "ok enough",
+  "okay enough",
+  "alright stop",
+  "all right stop",
+  "shut it",
+  "be silent",
+  "go silent",
+  "silent now",
+  "silent please",
+  "not now",
+  "hold that thought",
+  "hold the phone",
+  "give me a second",
+  "give me a moment",
+  "just a sec",
+  "just a second",
+  "just a moment",
+];
+
+/**
+ * Bug-O (2026-06-01) — silenced-mode resume phrases.
+ *
+ * While Jarvis is silenced, only one of these phrases (deterministic
+ * match) takes him back to active. Intentionally conservative — we do
+ * NOT want a casual "okay" or "yes" to accidentally resume Jarvis when
+ * the user was talking to someone else in the room.
+ *
+ * The banner copy MUST instruct the user with one of these exact
+ * phrases (default: "speak") so they know how to resume.
+ */
+export const RESUME_PHRASES: readonly string[] = [
+  "speak",
+  "speak now",
+  "speak up",
+  "you can speak",
+  "you may speak",
+  "talk",
+  "talk to me",
+  "resume",
+  "continue",
+  "go ahead",
+  "proceed",
+  "unsilence",
+  "unmute",
+  "jarvis speak",
+  "okay speak",
+];
+
+export function isSilencePhrase(transcript: string): boolean {
+  if (typeof transcript !== 'string' || transcript.length === 0) return false;
+  const norm = normalize(transcript);
+  for (const s of SILENCE_PHRASES) {
+    if (norm === normalize(s)) return true;
+  }
+  return false;
+}
+
+export function isResumePhrase(transcript: string): boolean {
+  if (typeof transcript !== 'string' || transcript.length === 0) return false;
+  const norm = normalize(transcript);
+  for (const r of RESUME_PHRASES) {
+    if (norm === normalize(r)) return true;
+  }
+  return false;
+}
+
 function normalize(text: string): string {
   return text.trim().toLowerCase().replace(NORMALIZE_TRAILING_PUNCT, '');
 }

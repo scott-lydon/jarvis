@@ -84,6 +84,12 @@ function App() {
   // dev panel so the user can see WHAT was filtered and why. Tied to
   // jarvis.input_discarded events (see jarvis-client.js).
   const [lastDiscarded, setLastDiscarded] = useState(null);
+  // Bug-O (2026-06-01) silenced-mode flag. While true the yellow
+  // banner renders ("Jarvis is silenced. Say 'speak' to continue.") and
+  // the audio.delta gate in jarvis-client.js drops any in-flight
+  // playback. Flipped by jarvis.silenced / jarvis.unsilenced from the
+  // proxy.
+  const [silenced, setSilenced] = useState(false);
   // Bug-F fix (2026-06-01): make the mic-intro banner state-derived
   // instead of imperative. The previous "push it into banners on mount,
   // pop it on onMicGranted" model had three separate dismissal triggers
@@ -299,6 +305,8 @@ function App() {
       onInputDiscarded: (reason, transcript) => {
         setLastDiscarded({ reason, transcript, at: nowTime() });
       },
+      onSilenced: (_transcript) => { setSilenced(true); },
+      onUnsilenced: (_transcript) => { setSilenced(false); },
     });
     clientRef.current = client;
     // Demo-harness globals — preserve existing behavior so headless harnesses
@@ -434,13 +442,32 @@ function App() {
     };
   }, [micPermissionState]);
 
+  // Bug-O (2026-06-01) silenced-mode banner. Matches the user's spec:
+  // "a yellow warning like the microphone permission banner at the
+  // beginning, reading 'Jarvis is silenced. Say the word speak to
+  // continue talking.'" Yellow (kind: 'warn') is the same chrome as
+  // the mic-intro banner so the user reads it the same way. Non-
+  // dismissible because the only way OUT of silenced mode is the
+  // resume phrase — clicking an X would create a false sense of
+  // exit while the proxy is still in create_response=false.
+  const silencedBanner = useMemo(() => {
+    if (!silenced) return null;
+    return {
+      id: 'jarvis_silenced', kind: 'warn',
+      title: 'Jarvis is silenced.',
+      body: 'Say the word "speak" to continue talking.',
+      dismissible: false,
+    };
+  }, [silenced]);
+
   const allBanners = useMemo(() => {
     const out = [];
+    if (silencedBanner) out.push(silencedBanner);
     if (micIntroBanner) out.push(micIntroBanner);
     if (micRevokedBanner) out.push(micRevokedBanner);
     for (const b of banners) out.push(b);
     return out;
-  }, [micIntroBanner, micRevokedBanner, banners]);
+  }, [silencedBanner, micIntroBanner, micRevokedBanner, banners]);
 
   return (
     <>

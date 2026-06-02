@@ -154,6 +154,11 @@
       // Set true on barge-in to ignore audio deltas that may still be in
       // flight while we tear down + rebuild the playback context.
       this.suppressDeltas = false;
+      // Bug-O (2026-06-01) silenced-mode mirror state. Authoritative
+      // copy lives on the proxy (so it can flip create_response on
+      // session.update); this local copy lets the client short-circuit
+      // any inbound audio.delta the proxy lets slip during the race.
+      this.silenced = false;
 
       this._tickLevels();
     }
@@ -551,6 +556,29 @@
           void this._handleInputDiscarded(evt.reason || 'unknown', evt.transcript || '');
           return;
 
+        case 'jarvis.silenced':
+          // Bug-O (2026-06-01): user uttered a silence phrase. Hard-
+          // teardown playback so the audio stops mid-sentence (under
+          // 100 ms), notify the React layer so it can render the
+          // yellow banner, and remember we are in silenced mode so
+          // future audio_delta events get suppressed locally too.
+          this.silenced = true;
+          void this._handleInputDiscarded('silenced', evt.transcript || '');
+          if (typeof this.listener.onSilenced === 'function') {
+            this.listener.onSilenced(evt.transcript || '');
+          }
+          return;
+
+        case 'jarvis.unsilenced':
+          // Bug-O: user said a resume phrase ("speak", "continue",
+          // …). Drop the silenced flag and let the React layer hide
+          // the banner.
+          this.silenced = false;
+          if (typeof this.listener.onUnsilenced === 'function') {
+            this.listener.onUnsilenced(evt.transcript || '');
+          }
+          return;
+
         case 'jarvis.error':
           if (typeof this.listener.onError === 'function') {
             this.listener.onError('Server error', evt.message || evt.error || 'unknown');
@@ -562,6 +590,10 @@
           // would re-fill the queue we just killed. Status flip to speaking
           // happens AFTER the suppress check so the UI doesn't flicker.
           if (this.suppressDeltas) return;
+          // Bug-O (2026-06-01): belt for silenced mode. If the user
+          // told Jarvis to be quiet, no audio plays no matter what
+          // raced through.
+          if (this.silenced) return;
           this._setStatus(STATUS_SPEAKING);
           this._enqueuePcm(evt.delta);
           return;
