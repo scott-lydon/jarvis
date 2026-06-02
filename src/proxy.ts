@@ -318,6 +318,14 @@ export function runProxy(opts: ProxyOptions): void {
       safeUpstreamSend({
         type: 'session.update',
         session: {
+          // Bug-T (2026-06-02): partial session.update payloads MUST
+          // still carry session.type=realtime — OpenAI rejects with
+          // 'Missing required parameter: session.type.' otherwise,
+          // which surfaced as a red upstream error banner in the user
+          // screenshot. The realtime voice-agent session is the one
+          // we created at session.update time (line ~113); we re-
+          // declare it here so the partial update validates.
+          type: 'realtime',
           audio: {
             input: {
               turn_detection: {
@@ -346,6 +354,14 @@ export function runProxy(opts: ProxyOptions): void {
       safeUpstreamSend({
         type: 'session.update',
         session: {
+          // Bug-T (2026-06-02): partial session.update payloads MUST
+          // still carry session.type=realtime — OpenAI rejects with
+          // 'Missing required parameter: session.type.' otherwise,
+          // which surfaced as a red upstream error banner in the user
+          // screenshot. The realtime voice-agent session is the one
+          // we created at session.update time (line ~113); we re-
+          // declare it here so the partial update validates.
+          type: 'realtime',
           audio: {
             input: {
               turn_detection: {
@@ -422,6 +438,8 @@ export function runProxy(opts: ProxyOptions): void {
         safeUpstreamSend({
           type: 'session.update',
           session: {
+            // Bug-T (2026-06-02): session.type required on partial updates.
+            type: 'realtime',
             audio: {
               input: {
                 turn_detection: {
@@ -464,6 +482,8 @@ export function runProxy(opts: ProxyOptions): void {
         safeUpstreamSend({
           type: 'session.update',
           session: {
+            // Bug-T (2026-06-02): session.type required on partial updates.
+            type: 'realtime',
             audio: {
               input: {
                 turn_detection: {
@@ -570,6 +590,8 @@ export function runProxy(opts: ProxyOptions): void {
           safeUpstreamSend({
             type: 'session.update',
             session: {
+              // Bug-T (2026-06-02): session.type required on partial updates.
+              type: 'realtime',
               audio: {
                 input: {
                   turn_detection: {

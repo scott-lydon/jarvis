@@ -558,7 +558,12 @@ function App() {
           marginTop: -2, marginBottom: 6,
           minHeight: 14,
         }}>
-          {STATE_META[state].hint}
+          {/* Bug-U (2026-06-02): drop the bottom "Routing…" hint when
+              thinking — the inline JARVIS chip in the log already
+              renders the routing indicator exactly where the user
+              expects to see Jarvis's response, and showing both was
+              a duplicate. Other states keep their hint. */}
+          {state === 'thinking' ? '' : STATE_META[state].hint}
         </div>
       </div>
 
