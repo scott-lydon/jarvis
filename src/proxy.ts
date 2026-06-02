@@ -169,18 +169,18 @@ export function runProxy(opts: ProxyOptions): void {
         tools,
         tool_choice: 'auto',
       },
-      // Lesson Y5 (2026-06-01): request transcription logprobs so the
-      // proxy gains a confidence signal it can use to filter low-
-      // confidence transcripts in a follow-up pass (today the SPOT
-      // artifact list is the only post-hoc filter; logprobs let us
-      // discard hallucinations the artifact list doesn't catch).
-      // Cost: a handful of extra bytes per transcript event. We are
-      // not USING logprobs yet — this lands the data plumbing so a
-      // future commit can add a confidence threshold without another
-      // round-trip to OpenAI. See:
-      // developers.openai.com/api/docs/guides/realtime-transcription
-      include: ['item.input_audio_transcription.logprobs'],
     };
+    // Lesson Y5 retracted (2026-06-01): the `include` field belongs
+    // inside `session` per the docs' transcription-session example,
+    // NOT at the top level of session.update — and even when placed
+    // correctly it appears unsupported on the realtime voice-agent
+    // session type, where OpenAI returns
+    //   "Unknown parameter: 'include'."
+    // and REJECTS the entire session.update — which cascades: no
+    // system prompt applied, no transcription model selected, no
+    // VAD config, no user-turn events flowing back. We are not
+    // consuming logprobs yet anyway; dropped until OpenAI documents
+    // the field for realtime voice agents.
     upstream.send(JSON.stringify(sessionUpdate));
     // Tell the downstream client the session is live; the client uses
     // this to flip its status from "connecting" to "listening".
