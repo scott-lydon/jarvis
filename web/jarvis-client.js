@@ -686,6 +686,19 @@
           this._setStatus(STATUS_LISTENING);
           return;
 
+        case 'response.audio_transcript.delta':
+          // Bug-W (2026-06-02): streaming assistant text. The user
+          // reported text "waiting until done" rather than appearing
+          // word-by-word — root cause was that we only handled the
+          // .done event. The .delta arrives as Jarvis speaks; we
+          // accumulate it into a streaming-turn item the React layer
+          // reveals incrementally.
+          if (this.isSilenced) return;
+          if (typeof this.listener.onAssistantStreamingDelta === 'function') {
+            this.listener.onAssistantStreamingDelta(evt.delta || '');
+          }
+          return;
+
         case 'response.audio_transcript.done':
           // Bug-S — assistant text bubbles are Jarvis output. Block
           // when silenced. The user reported "Understood, I'll stay

@@ -222,15 +222,61 @@ function App() {
           text,
         }]));
       },
+      onAssistantStreamingDelta: (delta) => {
+        // Bug-W (2026-06-02): append the streaming delta to the
+        // current in-progress assistant turn so the user sees text
+        // appear as Jarvis speaks. If no streaming turn exists yet,
+        // create one. The matching onAssistantTurn (which fires at
+        // the END of streaming) finalises the text and clears
+        // streamingId so the typewriter caret stops.
+        if (!delta) return;
+        setItems((it) => {
+          const idx = it.length - 1;
+          if (idx >= 0
+              && it[idx].kind === 'turn'
+              && it[idx].role === 'assistant'
+              && it[idx].id === streamingId) {
+            const next = it.slice();
+            next[idx] = { ...next[idx], text: (next[idx].text || '') + delta };
+            return next;
+          }
+          const newId = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+          setStreamingId(newId);
+          return it.concat([{
+            id: newId,
+            kind: 'turn',
+            role: 'assistant',
+            time: nowTime(),
+            text: delta,
+          }]);
+        });
+      },
       onAssistantTurn: (text) => {
-        const id = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-        setItems((it) => it.concat([{
-          id,
-          kind: 'turn',
-          role: 'assistant',
-          time: nowTime(),
-          text,
-        }]));
+        // Final transcript landed. If we were already streaming the
+        // same turn (Bug-W), replace its text with the canonical
+        // server-side string (the deltas can sometimes miss the last
+        // chunk if the response truncates). Otherwise append a fresh
+        // assistant item.
+        setItems((it) => {
+          const idx = it.length - 1;
+          if (idx >= 0
+              && it[idx].kind === 'turn'
+              && it[idx].role === 'assistant'
+              && it[idx].id === streamingId
+              && text) {
+            const next = it.slice();
+            next[idx] = { ...next[idx], text };
+            return next;
+          }
+          const id = `a_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+          return it.concat([{
+            id,
+            kind: 'turn',
+            role: 'assistant',
+            time: nowTime(),
+            text,
+          }]);
+        });
         setStreamingId(null);
       },
       onFiller: (text, tool) => {

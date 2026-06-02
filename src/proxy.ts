@@ -312,69 +312,28 @@ export function runProxy(opts: ProxyOptions): void {
         userId: userCtx.userId,
       });
       silenced = true;
+      // Bug-V (2026-06-02): no session.update for silence mode.
+      // The partial session.update with turn_detection.create_response
+      // was being rejected by OpenAI in a way that closed the upstream
+      // WebSocket (user saw 'Connection lost (code 1006)' every time
+      // they said 'quiet'). Cleaner approach: keep silenced state in
+      // the proxy, and the response.created handler in
+      // handleUpstreamEvent immediately cancels any response that
+      // fires while silenced. No upstream state mutation = no
+      // rejected validation = no connection drop.
       if (currentResponseId !== null) {
         safeUpstreamSend({ type: 'response.cancel', response_id: currentResponseId });
       }
-      safeUpstreamSend({
-        type: 'session.update',
-        session: {
-          // Bug-T (2026-06-02): partial session.update payloads MUST
-          // still carry session.type=realtime — OpenAI rejects with
-          // 'Missing required parameter: session.type.' otherwise,
-          // which surfaced as a red upstream error banner in the user
-          // screenshot. The realtime voice-agent session is the one
-          // we created at session.update time (line ~113); we re-
-          // declare it here so the partial update validates.
-          type: 'realtime',
-          audio: {
-            input: {
-              turn_detection: {
-                type: 'server_vad',
-                threshold: 0.75,
-                prefix_padding_ms: 600,
-                silence_duration_ms: 1500,
-                create_response: false,
-              },
-            },
-          },
-        },
-      });
       return;
     }
     if (type === 'jarvis.unsilenced') {
-      // Bug-S (2026-06-02) — browser detected the resume phrase. Flip
-      // create_response back to true so subsequent VAD turns trigger
-      // normal responses again.
       log.info({
         event: 'proxy.client_unsilenced',
         transcript: typeof evt['transcript'] === 'string' ? evt['transcript'] : '',
         userId: userCtx.userId,
       });
       silenced = false;
-      safeUpstreamSend({
-        type: 'session.update',
-        session: {
-          // Bug-T (2026-06-02): partial session.update payloads MUST
-          // still carry session.type=realtime — OpenAI rejects with
-          // 'Missing required parameter: session.type.' otherwise,
-          // which surfaced as a red upstream error banner in the user
-          // screenshot. The realtime voice-agent session is the one
-          // we created at session.update time (line ~113); we re-
-          // declare it here so the partial update validates.
-          type: 'realtime',
-          audio: {
-            input: {
-              turn_detection: {
-                type: 'server_vad',
-                threshold: 0.75,
-                prefix_padding_ms: 600,
-                silence_duration_ms: 1500,
-                create_response: true,
-              },
-            },
-          },
-        },
-      });
+      // Bug-V: nothing to undo upstream — see the silenced branch above.
       return;
     }
     if (type === 'jarvis.ping') {
@@ -397,6 +356,20 @@ export function runProxy(opts: ProxyOptions): void {
       if (response !== null && typeof response === 'object') {
         const id = (response as { id?: unknown }).id;
         if (typeof id === 'string') currentResponseId = id;
+        // Bug-V (2026-06-02): proxy-side gate. While silenced, any
+        // response auto-triggered by server VAD is immediately
+        // cancelled before the model produces audio. This replaces
+        // the session.update + create_response=false approach, which
+        // was crashing the upstream WebSocket. Cleaner: tracker the
+        // state in JS, react when a response actually starts.
+        if (silenced && typeof id === 'string') {
+          log.info({
+            event: 'proxy.response_cancelled_while_silenced',
+            responseId: id,
+            userId: userCtx.userId,
+          });
+          safeUpstreamSend({ type: 'response.cancel', response_id: id });
+        }
       }
     }
     if (type === 'response.done') {
@@ -404,22 +377,25 @@ export function runProxy(opts: ProxyOptions): void {
     }
     // Y: rename the GA audio delta event to the older name our clients use.
     if (type === 'response.output_audio.delta') {
-      // Bug-O: while silenced, suppress every audio.delta forwarded to
-      // the client even if OpenAI's response.cancel arrived AFTER the
-      // server had already started streaming. Belt for the race.
+      // Bug-V: while silenced, drop on the floor. The browser also
+      // gates this via isSilenced, but suppressing it at the proxy
+      // saves the round-trip bytes.
       if (silenced) return;
       safeClientSend({ ...evt, type: 'response.audio.delta' });
       return;
     }
     if (type === 'response.output_audio.done') {
+      if (silenced) return;
       safeClientSend({ ...evt, type: 'response.audio.done' });
       return;
     }
     if (type === 'response.output_audio_transcript.delta') {
+      if (silenced) return;
       safeClientSend({ ...evt, type: 'response.audio_transcript.delta' });
       return;
     }
     if (type === 'response.output_audio_transcript.done') {
+      if (silenced) return;
       const transcript = readString(evt, 'transcript');
       onTurn?.({ role: 'assistant', content: transcript });
       safeClientSend({ ...evt, type: 'response.audio_transcript.done' });
@@ -435,24 +411,10 @@ export function runProxy(opts: ProxyOptions): void {
       if (silenced && isResumePhrase(transcript)) {
         log.info({ event: 'proxy.resume_phrase', transcript, userId: userCtx.userId });
         silenced = false;
-        safeUpstreamSend({
-          type: 'session.update',
-          session: {
-            // Bug-T (2026-06-02): session.type required on partial updates.
-            type: 'realtime',
-            audio: {
-              input: {
-                turn_detection: {
-                  type: 'server_vad',
-                  threshold: 0.75,
-                  prefix_padding_ms: 600,
-                  silence_duration_ms: 1500,
-                  create_response: true,
-                },
-              },
-            },
-          },
-        });
+        // Bug-V (2026-06-02): no session.update — see jarvis.silenced
+        // handler for the rationale. We just flip the proxy-side flag;
+        // response.created on subsequent VAD turns is no longer being
+        // pre-cancelled by handleUpstreamEvent.
         onTurn?.({ role: 'user', content: transcript });
         safeClientSend(evt);
         safeClientSend({ type: 'jarvis.unsilenced', transcript });
@@ -479,24 +441,10 @@ export function runProxy(opts: ProxyOptions): void {
         if (currentResponseId !== null) {
           safeUpstreamSend({ type: 'response.cancel', response_id: currentResponseId });
         }
-        safeUpstreamSend({
-          type: 'session.update',
-          session: {
-            // Bug-T (2026-06-02): session.type required on partial updates.
-            type: 'realtime',
-            audio: {
-              input: {
-                turn_detection: {
-                  type: 'server_vad',
-                  threshold: 0.75,
-                  prefix_padding_ms: 600,
-                  silence_duration_ms: 1500,
-                  create_response: false,
-                },
-              },
-            },
-          },
-        });
+        // Bug-V (2026-06-02): no session.update — see jarvis.silenced
+        // handler for the rationale. The response.created handler in
+        // handleUpstreamEvent will pre-cancel any new response that
+        // VAD auto-triggers while silenced is true.
         safeClientSend({ type: 'jarvis.silenced', transcript });
         return;
       }
@@ -587,24 +535,8 @@ export function runProxy(opts: ProxyOptions): void {
           if (currentResponseId !== null) {
             safeUpstreamSend({ type: 'response.cancel', response_id: currentResponseId });
           }
-          safeUpstreamSend({
-            type: 'session.update',
-            session: {
-              // Bug-T (2026-06-02): session.type required on partial updates.
-              type: 'realtime',
-              audio: {
-                input: {
-                  turn_detection: {
-                    type: 'server_vad',
-                    threshold: 0.75,
-                    prefix_padding_ms: 600,
-                    silence_duration_ms: 1500,
-                    create_response: false,
-                  },
-                },
-              },
-            },
-          });
+          // Bug-V (2026-06-02): no session.update — see jarvis.silenced
+          // handler. response.created interception is the new gate.
           safeClientSend({ type: 'jarvis.silenced', transcript });
         })().catch((err: unknown) => {
           log.warn({
