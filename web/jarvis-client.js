@@ -236,31 +236,48 @@
     // ── Audio open / teardown ────────────────────────────────────
     async _openAudio(opts) {
       if (opts && opts.withMic) {
-        // Bug-1 fix (2026-05-31): drop `noiseSuppression: true` and the
-        // `sampleRate` constraint.
+        // Bug-N (2026-06-01): per-caller audio constraints.
         //
-        // Why: Chrome's noiseSuppression aggressively zero-fills buffers
-        // that don't match its speech profile (room noise, quiet voice,
-        // accented input, anything brief). When that happens upstream
-        // Whisper hears silence and falls back to its most common
-        // single-token output: "you". That is the EXACT symptom the user
-        // saw — every utterance transcribed to "you". `echoCancellation`
-        // stays ON because the playback bleeds into the mic otherwise
-        // and trips fake barge-ins.
+        // Diagnostic-WAV analysis on the 2026-06-01 mic-test capture
+        // showed ZERO sample-to-sample impulse events (no real clicks
+        // in the audio data) but 29 of 100 50-ms windows in dropout:
+        // RMS went hard to 0.0 at 0.60 s, crawled back from near-zero
+        // over the next 0.5 s. That signature is browser audio
+        // PROCESSING, not the underlying mic.
         //
-        // We also let the mic deliver at its native rate (usually 48 kHz)
-        // and let the AudioContext + pcm-recorder worklet handle the
-        // 48→24 kHz downsample with linear interpolation. The previous
-        // `sampleRate: 24000` constraint was silently ignored by every
-        // browser, which produced subtle aliasing on top of the noise-
-        // suppression damage.
+        // Two suspects, both default-on in the prior config:
+        //   - echoCancellation: when there's no playback to cancel
+        //     against (mic test has no Jarvis speaking), Safari's
+        //     impl aggressively zeros audio it can't model. Produces
+        //     full dropouts.
+        //   - autoGainControl: dynamically ramps gain, producing the
+        //     "volume swells / drops the user didn't make" the user
+        //     reported. Voice Memos has AGC OFF by default, which is
+        //     why it sounds clean by comparison.
+        //
+        // New defaults:
+        //   - Live session : echoCancellation TRUE (we need to
+        //                    suppress playback bleed when Jarvis is
+        //                    speaking), AGC FALSE (Whisper prefers
+        //                    consistent levels; AGC voice modulation
+        //                    is part of why the streaming path
+        //                    hallucinated). noiseSuppression FALSE
+        //                    (Bug-1 history, unchanged).
+        //   - Mic test     : ALL three FALSE — raw mic, the verification
+        //                    must show what the mic actually hears, not
+        //                    what Safari's processors decided to keep.
+        //
+        // Caller passes opts.rawCaptureForMicTest=true for the mic-test
+        // path; otherwise defaults to live-session constraints.
+        const rawCapture = !!(opts && opts.rawCaptureForMicTest);
+        const audioConstraints = {
+          echoCancellation: !rawCapture,
+          noiseSuppression: false,
+          autoGainControl: false,
+          channelCount: 1,
+        };
         const stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: true,
-            noiseSuppression: false,
-            autoGainControl: true,
-            channelCount: 1,
-          },
+          audio: audioConstraints,
           video: false,
         });
         this.micStream = stream;
@@ -787,7 +804,12 @@
       this.demoMode = false;
       this.intentionalClose = false;
       try {
-        await this._openAudio({ withMic: true });
+        // Bug-N (2026-06-01): mic test uses RAW audio constraints (no
+        // echo cancellation, no AGC) so the recording faithfully shows
+        // what the mic captured, not what Safari's processors decided
+        // to keep. The live session enables echo cancellation but
+        // leaves AGC off — see _openAudio for the rationale.
+        await this._openAudio({ withMic: true, rawCaptureForMicTest: true });
       } catch (cause) {
         this.active = false;
         throw cause;
