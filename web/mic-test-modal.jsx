@@ -31,11 +31,35 @@
 
 const { useCallback: useCb_DIAG, useEffect: useEffect_DIAG, useRef: useRef_DIAG, useState: useState_DIAG } = React;
 
-const PHASE_INTRO       = 'intro';
+// Bug-M (2026-06-01): permission-aware phase machine. Previous flow
+// called getUserMedia INSIDE startMicTestRecording, so the OS
+// permission prompt landed on top of an already-active recording UI.
+// New flow: query the Permissions API on mount, request grant in a
+// dedicated phase, and only enter the recording phase when the
+// browser reports the permission is actually granted.
+//
+//   checking     → modal just opened; querying Permissions API
+//   needs_grant  → permission is 'prompt' (or unknown); user must
+//                  click "Grant microphone access" which triggers
+//                  the OS prompt in isolation
+//   granting     → getUserMedia in flight; user is staring at the OS
+//                  prompt; modal shows a quiet "waiting for Allow…"
+//   ready        → permission is 'granted'; show "Start (5 s)"
+//   recording    → mic is open and capturing
+//   playback     → recording done; user can play it back
+//   transcribing → POSTing the WAV to /api/transcribe-test
+//   result       → got a transcript; user decides what's next
+//   denied       → permission was denied; show re-enable instructions
+//   error        → catch-all for anything that threw mid-flow
+const PHASE_CHECKING    = 'checking';
+const PHASE_NEEDS_GRANT = 'needs_grant';
+const PHASE_GRANTING    = 'granting';
+const PHASE_READY       = 'ready';
 const PHASE_RECORDING   = 'recording';
 const PHASE_PLAYBACK    = 'playback';
 const PHASE_TRANSCRIBE  = 'transcribing';
 const PHASE_RESULT      = 'result';
+const PHASE_DENIED      = 'denied';
 const PHASE_ERROR       = 'error';
 
 const RECORD_SECONDS = 5;
@@ -65,12 +89,78 @@ function micTestForcedOpen() {
  * is called if they back out (real session does NOT start).
  */
 function MicTestModal({ clientRef, onConfirm, onDismiss }) {
-  const [phase, setPhase]             = useState_DIAG(PHASE_INTRO);
+  const [phase, setPhase]             = useState_DIAG(PHASE_CHECKING);
   const [recordedSec, setRecordedSec] = useState_DIAG(0);
   const [transcript, setTranscript]   = useState_DIAG(null);
   const [error, setError]             = useState_DIAG(null);
   const [transcribeMeta, setTranscribeMeta] = useState_DIAG(null);
   const tickRef = useRef_DIAG(null);
+
+  // Bug-M (2026-06-01): query the Permissions API on mount, and listen
+  // for state changes (browser settings flip, another tab grants, the
+  // user revokes mid-flow, etc.). Three-layer fallback so this works on
+  // every browser the user is plausibly on:
+  //   1. navigator.permissions.query({ name: 'microphone' }) — Chromium
+  //      and Safari 16+. Resolves with PermissionStatus that has a
+  //      `state` field plus a 'change' event.
+  //   2. If the query throws (older Safari / Firefox), we land on
+  //      PHASE_NEEDS_GRANT and rely on the user's click to trigger
+  //      getUserMedia for both permission and detection.
+  //   3. If the change event isn't supported, poll the state every
+  //      750 ms while the modal is mounted — cheap, and covers the
+  //      Safari case where settings can be flipped without firing the
+  //      event.
+  useEffect_DIAG(() => {
+    let cancelled = false;
+    let statusRef = null;
+    let pollTimer = null;
+
+    function applyState(state) {
+      if (cancelled) return;
+      if (state === 'granted') {
+        setPhase((prev) => (prev === PHASE_CHECKING || prev === PHASE_NEEDS_GRANT || prev === PHASE_GRANTING || prev === PHASE_DENIED ? PHASE_READY : prev));
+      } else if (state === 'denied') {
+        setPhase((prev) => (prev === PHASE_RECORDING || prev === PHASE_PLAYBACK || prev === PHASE_RESULT ? prev : PHASE_DENIED));
+      } else {
+        // 'prompt' or any unknown value — let the user kick off the
+        // OS prompt explicitly via the needs_grant phase.
+        setPhase((prev) => (prev === PHASE_CHECKING ? PHASE_NEEDS_GRANT : prev));
+      }
+    }
+
+    async function init() {
+      if (typeof navigator === 'undefined' || !navigator.permissions || !navigator.permissions.query) {
+        // No Permissions API — assume the user hasn't granted yet so
+        // we surface the explicit grant CTA before any recording UI.
+        if (!cancelled) setPhase(PHASE_NEEDS_GRANT);
+        return;
+      }
+      try {
+        const status = await navigator.permissions.query({ name: 'microphone' });
+        if (cancelled) return;
+        statusRef = status;
+        applyState(status.state);
+        const onChange = () => { applyState(status.state); };
+        try { status.addEventListener('change', onChange); }
+        catch (_) { status.onchange = onChange; }
+        // Belt-and-suspenders polling for Safari, which is known to
+        // miss the 'change' event in some configurations. Cheap.
+        pollTimer = window.setInterval(() => {
+          if (statusRef && typeof statusRef.state === 'string') applyState(statusRef.state);
+        }, 750);
+      } catch (_) {
+        if (!cancelled) setPhase(PHASE_NEEDS_GRANT);
+      }
+    }
+    void init();
+    return () => {
+      cancelled = true;
+      if (pollTimer) window.clearInterval(pollTimer);
+      if (statusRef) {
+        try { statusRef.removeEventListener('change', () => {}); } catch (_) { /* ignore */ }
+      }
+    };
+  }, []);
 
   // Live elapsed-seconds tick while recording, so the user sees the
   // countdown progressing instead of staring at a frozen spinner.
@@ -87,6 +177,39 @@ function MicTestModal({ clientRef, onConfirm, onDismiss }) {
       if (tickRef.current) { window.clearInterval(tickRef.current); tickRef.current = null; }
     };
   }, [phase]);
+
+  // Bug-M (2026-06-01): explicit permission request. Calling
+  // getUserMedia OUTSIDE the recording phase isolates the OS prompt
+  // from any active recording UI. We immediately stop the returned
+  // tracks because all we wanted was the permission flip — the next
+  // getUserMedia (inside startMicTestRecording) will reuse the
+  // already-granted permission without prompting again.
+  const handleGrant = useCb_DIAG(async () => {
+    if (typeof navigator === 'undefined' || !navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+      setError('This browser does not expose navigator.mediaDevices.getUserMedia.');
+      setPhase(PHASE_ERROR);
+      return;
+    }
+    setPhase(PHASE_GRANTING);
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      // We have permission. We don't need the stream — stop tracks so
+      // the mic indicator turns off until the user clicks Start.
+      const tracks = stream.getTracks();
+      for (const t of tracks) { try { t.stop(); } catch (_) { /* ignore */ } }
+      setPhase(PHASE_READY);
+    } catch (cause) {
+      const name = cause && cause.name;
+      if (name === 'NotAllowedError' || name === 'PermissionDeniedError') {
+        setPhase(PHASE_DENIED);
+        return;
+      }
+      // NotFoundError / OverconstrainedError / etc. surface as error
+      // with the specific name so the user can act on it.
+      setError(`${name || 'getUserMedia failed'}: ${(cause && cause.message) || String(cause)}`);
+      setPhase(PHASE_ERROR);
+    }
+  }, []);
 
   const handleStartRecording = useCb_DIAG(async () => {
     const c = clientRef.current;
@@ -234,7 +357,41 @@ function MicTestModal({ clientRef, onConfirm, onDismiss }) {
         </div>
         <div style={body}>
 
-          {phase === PHASE_INTRO && (
+          {phase === PHASE_CHECKING && (
+            <div style={subdued}>Checking microphone permission…</div>
+          )}
+
+          {phase === PHASE_NEEDS_GRANT && (
+            <>
+              <div>Let's test your mic. First, grant microphone access.</div>
+              <div style={subdued}>
+                Safari will ask you to allow this site to use your
+                microphone. After you click Allow, this modal moves on
+                to the recording step.
+              </div>
+              <div style={ctaRow}>
+                <button type="button" style={btnPrimary} onClick={handleGrant}>
+                  Grant microphone access
+                </button>
+                <button type="button" style={btnSecondary} onClick={onDismiss}>
+                  Cancel
+                </button>
+              </div>
+            </>
+          )}
+
+          {phase === PHASE_GRANTING && (
+            <>
+              <div><strong>Waiting for you to click Allow in the browser prompt…</strong></div>
+              <div style={subdued}>
+                If you don't see the OS-level prompt, check whether
+                you've previously blocked this site for microphone use
+                (Safari → Settings → Websites → Microphone).
+              </div>
+            </>
+          )}
+
+          {phase === PHASE_READY && (
             <>
               <div>Let's test your mic.</div>
               <div style={ctaRow}>
@@ -244,6 +401,21 @@ function MicTestModal({ clientRef, onConfirm, onDismiss }) {
                 <button type="button" style={btnSecondary} onClick={() => { setMicTestSessionPassed(); onConfirm(); }}>
                   Skip
                 </button>
+              </div>
+            </>
+          )}
+
+          {phase === PHASE_DENIED && (
+            <>
+              <div style={{ color: 'var(--err)' }}><strong>Microphone access denied</strong></div>
+              <div style={subdued}>
+                Safari → Settings → Websites → Microphone → set this
+                site (jarvis-biyx.onrender.com) to Allow. Then reopen
+                this modal. There is no way to re-trigger the OS prompt
+                from JavaScript once a site has been denied.
+              </div>
+              <div style={ctaRow}>
+                <button type="button" style={btnSecondary} onClick={onDismiss}>Close</button>
               </div>
             </>
           )}
