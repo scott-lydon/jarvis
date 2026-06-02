@@ -29,6 +29,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { WebSocket as UpstreamWS, type RawData } from 'ws';
 import type { WebSocket as ClientWS } from 'ws';
 
+import { agenticallyCheckSilence } from './agentic-silence-check.js';
 import { isResumePhrase, isSilencePhrase, isStopCommand, isWhisperArtifact } from './audio-artifacts.js';
 import type { JarvisEnv } from './env.js';
 import { log } from './logger.js';
@@ -464,6 +465,69 @@ export function runProxy(opts: ProxyOptions): void {
 
       if (transcript.length > 0) onTurn?.({ role: 'user', content: transcript });
       safeClientSend(evt);
+
+      // Bug-R (2026-06-02) — AGENTIC FALLBACK. User explicitly asked:
+      //   "make an agentic check for every incoming message to see if
+      //   it is a form of saying quiet as a fallback (though slower it
+      //   would catch the cases faster than not catching them if they
+      //   weren't added to the list)."
+      // Deterministic checks above (isSilencePhrase with its short-phrase
+      // heuristic) catch the bulk of phrasings — the agentic check is
+      // the last-line net for anything we didn't enumerate.
+      //
+      // Fire-and-forget: the user-turn event was already forwarded
+      // above (synchronous), so the bubble appears immediately. The
+      // gpt-4o-mini call resolves in ~200-500 ms; if it says YES we
+      // cancel the in-flight response and enter silenced mode, which
+      // tears down the playback context client-side. The user hears
+      // the first ~300 ms of Jarvis's response then it cuts off and
+      // the yellow banner appears — much better than the response
+      // playing in full.
+      //
+      // Gate: only invoke for short utterances (≤ 10 words) where a
+      // silence command is plausible. Longer transcripts are
+      // conversational and never silence commands; not worth the call.
+      const wordCount = transcript.split(/\s+/).filter((w) => w.length > 0).length;
+      if (!silenced && wordCount > 0 && wordCount <= 10) {
+        void (async () => {
+          const result = await agenticallyCheckSilence(transcript, {
+            openaiApiKey: env.openaiApiKey,
+          });
+          if (!result.isSilence || silenced) return;
+          log.info({
+            event: 'proxy.agentic_silence_triggered',
+            transcript,
+            rawModelResponse: result.rawResponse,
+            userId: userCtx.userId,
+          });
+          silenced = true;
+          if (currentResponseId !== null) {
+            safeUpstreamSend({ type: 'response.cancel', response_id: currentResponseId });
+          }
+          safeUpstreamSend({
+            type: 'session.update',
+            session: {
+              audio: {
+                input: {
+                  turn_detection: {
+                    type: 'server_vad',
+                    threshold: 0.75,
+                    prefix_padding_ms: 600,
+                    silence_duration_ms: 1500,
+                    create_response: false,
+                  },
+                },
+              },
+            },
+          });
+          safeClientSend({ type: 'jarvis.silenced', transcript });
+        })().catch((err: unknown) => {
+          log.warn({
+            event: 'proxy.agentic_silence_unexpected',
+            message: err instanceof Error ? err.message : String(err),
+          });
+        });
+      }
       return;
     }
     if (type === 'response.function_call_arguments.delta') {

@@ -28,7 +28,15 @@
 // behavior) directly contradicted each other. Filtering at the proxy
 // with one shared list keeps the UI and the model in sync.
 
-const NORMALIZE_TRAILING_PUNCT = /[.!?,;:]+$/;
+// Bug-R fix (2026-06-02): normalize must strip ALL punctuation, not just
+// trailing. Whisper frequently inserts commas / periods / quotes mid-
+// transcript ("Quiet, please.", "Be quiet, Jarvis.") which the prior
+// trailing-only regex left intact — so exact-match against the SILENCE
+// list missed phrasings the user clearly meant as a stop command.
+// Internal whitespace gets collapsed too so "be   quiet" matches "be
+// quiet".
+const NORMALIZE_PUNCT_ANYWHERE = /[.!?,;:'"`-]+/g;
+const NORMALIZE_WHITESPACE = /\s+/g;
 
 /** Whisper YouTube-corpus filler phrases — strong sign of near-silence. */
 export const WHISPER_ARTIFACTS: readonly string[] = [
@@ -162,6 +170,12 @@ export function isSilencePhrase(transcript: string): boolean {
   for (const s of SILENCE_PHRASES) {
     if (norm === normalize(s)) return true;
   }
+  // Bug-R (2026-06-02): short-phrase heuristic as a deterministic
+  // fallback BEFORE the LLM agentic check (which lives in src/proxy.ts).
+  // This catches the common case Whisper-with-context phrasings ("quiet
+  // please", "shush jarvis", "be silent", "enough now") without an API
+  // round-trip.
+  if (matchesShortPhraseHeuristic(norm)) return true;
   return false;
 }
 
@@ -175,7 +189,47 @@ export function isResumePhrase(transcript: string): boolean {
 }
 
 function normalize(text: string): string {
-  return text.trim().toLowerCase().replace(NORMALIZE_TRAILING_PUNCT, '');
+  return text.trim().toLowerCase()
+    .replace(NORMALIZE_PUNCT_ANYWHERE, '')
+    .replace(NORMALIZE_WHITESPACE, ' ')
+    .trim();
+}
+
+/**
+ * Bug-R (2026-06-02) — short-phrase silence heuristic.
+ *
+ * If a transcript is 3 words or fewer AND contains one of these
+ * unambiguous silence keywords as a whole word, treat it as a silence
+ * command even if the exact phrasing wasn't enumerated in
+ * SILENCE_PHRASES. Reasoning: at this length, the user is almost
+ * certainly addressing Jarvis directly with an imperative — false
+ * positives like "she was quiet" require more than 3 words to be
+ * grammatically natural.
+ *
+ * "stop" and "shut" are intentionally NOT in this keyword set because
+ * they appear too often in conversational uses ("stop the car",
+ * "shut the door"). Both have their exact variants in SILENCE_PHRASES.
+ */
+const SHORT_PHRASE_SILENCE_KEYWORDS: ReadonlySet<string> = new Set([
+  'quiet',
+  'silence',
+  'silent',
+  'shush',
+  'hush',
+  'enough',
+  'pause',
+  'halt',
+  'mute',
+]);
+
+function matchesShortPhraseHeuristic(norm: string): boolean {
+  if (norm.length === 0) return false;
+  const words = norm.split(' ').filter((w) => w.length > 0);
+  if (words.length === 0 || words.length > 3) return false;
+  for (const w of words) {
+    if (SHORT_PHRASE_SILENCE_KEYWORDS.has(w)) return true;
+  }
+  return false;
 }
 
 /**

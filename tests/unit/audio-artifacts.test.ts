@@ -101,7 +101,7 @@ describe('isStopCommand (Bug-J)', () => {
   });
 });
 
-describe('isSilencePhrase (Bug-O)', () => {
+describe('isSilencePhrase (Bug-O + Bug-R)', () => {
   it('matches every SILENCE_PHRASES entry exactly + punctuation tolerated', () => {
     for (const phrase of SILENCE_PHRASES) {
       expect(isSilencePhrase(phrase), `bare: ${phrase}`).toBe(true);
@@ -116,10 +116,39 @@ describe('isSilencePhrase (Bug-O)', () => {
     expect(isSilencePhrase('enough')).toBe(true);
   });
 
+  // Bug-R (2026-06-02): the precise phrasings that bit the user in
+  // the live screenshot — Whisper added context that broke
+  // exact-match against the prior trailing-only normalizer.
+  it('matches Whisper-with-context phrasings (Bug-R fix)', () => {
+    expect(isSilencePhrase('Quiet, please.')).toBe(true);
+    expect(isSilencePhrase('Be quiet, Jarvis.')).toBe(true);
+    expect(isSilencePhrase('Shush, Jarvis.')).toBe(true);
+    expect(isSilencePhrase('Quiet now please')).toBe(true);
+    expect(isSilencePhrase('OK, quiet.')).toBe(true);
+    expect(isSilencePhrase('please be quiet')).toBe(true);
+    expect(isSilencePhrase('  Quiet!  ')).toBe(true);
+  });
+
+  it('short-phrase heuristic: ≤3 words containing silence keyword', () => {
+    expect(isSilencePhrase('shush you')).toBe(true);
+    expect(isSilencePhrase('quiet down')).toBe(true);
+    expect(isSilencePhrase('hush now')).toBe(true);
+    expect(isSilencePhrase('enough already')).toBe(true);
+    expect(isSilencePhrase('pause please')).toBe(true);
+    expect(isSilencePhrase('mute')).toBe(true);
+  });
+
   it('does NOT match conversational uses of stop words', () => {
     expect(isSilencePhrase("wait that's not what I meant")).toBe(false);
     expect(isSilencePhrase('stop the car')).toBe(false);
     expect(isSilencePhrase('hold on a second I am thinking')).toBe(false);
+  });
+
+  it('does NOT match >3-word phrases containing the silence keyword (heuristic false-positive guard)', () => {
+    // "She was very quiet" — 4 words, contains quiet → must NOT match.
+    expect(isSilencePhrase('she was very quiet')).toBe(false);
+    expect(isSilencePhrase('I love quiet music a lot')).toBe(false);
+    expect(isSilencePhrase('the library was quite quiet today')).toBe(false);
   });
 
   it('superset of STOP_COMMANDS', () => {
