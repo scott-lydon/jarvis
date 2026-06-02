@@ -23,7 +23,7 @@
  * one fewer build tool to keep alive).
  */
 
-import { existsSync, mkdirSync, readdirSync, copyFileSync, statSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, copyFileSync, readFileSync, statSync, writeFileSync, rmSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -74,6 +74,36 @@ function copyTree(srcDir, destDir) {
   }
 }
 
+/**
+ * Bug-L fix (2026-06-01): cache-bust every script/css URL in
+ * index.html with a per-build version stamp. Reason: when src/index.ts
+ * was sending Cache-Control: max-age=31536000, immutable for non-
+ * index.html assets (the previous policy), Safari locked in cached
+ * copies for a year. Switching the server header to no-cache fixed
+ * NEW visitors but does NOT free existing visitors from the poisoned
+ * immutable entry — per HTTP spec the browser MUST NOT revalidate an
+ * immutable response during its freshness lifetime. The only fool-
+ * proof unlock is a NEW URL, so we append `?v=<buildStamp>` to every
+ * referenced script/style. Each new deploy gets a new stamp, the URLs
+ * change, the browser fetches fresh code. Old cache entries stay in
+ * the cache pointlessly but are never referenced again.
+ */
+function rewriteHtmlWithCacheBust(html, buildStamp) {
+  // Replace src="foo.js" / src='foo.jsx' / href="foo.css" attributes
+  // with the same path + ?v=<buildStamp>. Skip URLs that:
+  //   - already carry a query string (someone is doing their own bust)
+  //   - are absolute (https://, //) — we don't proxy those
+  //   - point at fragments / mailto (no path component)
+  const tagPattern = /(\s(?:src|href)=)(["'])([^"']+)\2/g;
+  return html.replace(tagPattern, (whole, attr, quote, url) => {
+    if (url.startsWith('http://') || url.startsWith('https://') || url.startsWith('//')) return whole;
+    if (url.startsWith('#') || url.startsWith('mailto:')) return whole;
+    if (url.includes('?')) return whole;
+    if (!/\.(jsx?|mjs|css)$/i.test(url)) return whole;
+    return `${attr}${quote}${url}?v=${buildStamp}${quote}`;
+  });
+}
+
 function main() {
   // Wipe the previous build so stale files (e.g. the old vite-built
   // index.html that didn't reference the design bundle) never leak.
@@ -81,6 +111,10 @@ function main() {
     rmSync(DIST_DIR, { recursive: true, force: true });
   }
   ensureDir(DIST_DIR);
+
+  // Build stamp: epoch seconds (10-digit, sorts naturally, no shell
+  // dependency on git which may be missing in some CI shapes).
+  const buildStamp = Math.floor(Date.now() / 1000).toString();
 
   for (const item of COPY_PLAN) {
     const src = join(item.root, item.from);
@@ -90,7 +124,14 @@ function main() {
     }
     const dest = join(DIST_DIR, item.to);
     ensureDir(dirname(dest));
-    copyFileSync(src, dest);
+    // index.html gets its script/css URLs cache-busted on the way in.
+    // Every other file is a verbatim copy.
+    if (item.to === 'index.html') {
+      const html = readFileSync(src, 'utf-8');
+      writeFileSync(dest, rewriteHtmlWithCacheBust(html, buildStamp), 'utf-8');
+    } else {
+      copyFileSync(src, dest);
+    }
   }
 
   // Demo manifests subtree — recursive copy of web/public/demo/.
@@ -104,7 +145,15 @@ function main() {
     process.exit(1);
   }
 
-  console.log(`web-build: assembled ${COPY_PLAN.length} files into ${DIST_DIR}`);
+  // Sanity check: the cache-bust pass must have actually inserted ?v=
+  // at least once, otherwise we ship a stale-cache hazard for free.
+  const finalHtml = readFileSync(join(DIST_DIR, 'index.html'), 'utf-8');
+  if (!finalHtml.includes(`?v=${buildStamp}`)) {
+    console.error('web-build: cache-bust pass produced ZERO replacements — every script/css URL in index.html was skipped. Either the file is empty or the regex no longer matches the current markup. Refusing to ship a known stale-cache hazard.');
+    process.exit(1);
+  }
+
+  console.log(`web-build: assembled ${COPY_PLAN.length} files into ${DIST_DIR}, cache-bust stamp=${buildStamp}`);
 }
 
 main();
